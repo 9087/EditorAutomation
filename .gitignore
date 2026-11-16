@@ -1,0 +1,22 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE / Visual Studio
+.vs/
+*.sln
+*.VC.db
+*.VC.db.lock
+*.opensdf
+*.sdf
+*.suo
+*.xcodeproj/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local notes that must not be published
+*.local.md
