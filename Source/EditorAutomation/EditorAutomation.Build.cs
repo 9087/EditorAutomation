@@ -14,6 +14,7 @@ public class EditorAutomation : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"UMG",
+			"InputCore",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

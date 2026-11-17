@@ -65,4 +65,8 @@ public:
 		const FString& AssetPath,
 		const FString& ParentClassPath,
 		int32 BlueprintType = 0);
+
+	/** KGUI/blueprint-editor Lua path bound to this Blueprint (empty when none). */
+	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprint")
+	static FString GetBlueprintLuaPath(UBlueprint* Blueprint);
 };

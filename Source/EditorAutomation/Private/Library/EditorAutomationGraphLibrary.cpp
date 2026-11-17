@@ -13,8 +13,12 @@
 #include "K2Node_CallArrayFunction.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_Composite.h"
+#include "K2Node_CustomEvent.h"
 #include "K2Node_Event.h"
 #include "K2Node_IfThenElse.h"
+#include "K2Node_MacroInstance.h"
+#include "K2Node_Variable.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "ScopedTransaction.h"
@@ -27,6 +31,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/UnrealType.h"
+#include "Misc/Guid.h"
 
 namespace
 {
@@ -240,24 +245,110 @@ TArray<FEditorAutomationBlueprintGraphInfo> UEditorAutomationGraphLibrary::GetBl
 	return Graphs;
 }
 
-TArray<FEditorAutomationGraphNodeInfo> UEditorAutomationGraphLibrary::GetGraphNodes(UEdGraph* Graph)
+TArray<FEditorAutomationGraphNodeInfo> UEditorAutomationGraphLibrary::GetGraphNodes(UEdGraph* Graph, bool bRecursive)
 {
 	TArray<FEditorAutomationGraphNodeInfo> Nodes;
 	if (Graph == nullptr) return Nodes;
+
 	for (UEdGraphNode* Node : Graph->Nodes)
 	{
 		if (Node == nullptr) continue;
 		FEditorAutomationGraphNodeInfo Info;
+		Info.GraphObjectPath = Graph->GetPathName();
 		Info.NodeObjectPath = Node->GetPathName();
 		Info.NodeClassPath = Node->GetClass()->GetPathName();
 		Info.NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
 		Info.NodePosX = Node->NodePosX;
 		Info.NodePosY = Node->NodePosY;
+		if (UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(Node))
+		{
+			Info.MemberName = Call->GetFunctionName().ToString();
+			if (UFunction* Target = Call->GetTargetFunction())
+			{
+				Info.TargetClassPath = Target->GetOuterUClass() != nullptr ? Target->GetOuterUClass()->GetPathName() : FString();
+			}
+		}
+		else if (UK2Node_ComponentBoundEvent* BoundEvent = Cast<UK2Node_ComponentBoundEvent>(Node))
+		{
+			Info.MemberName = BoundEvent->ComponentPropertyName.ToString();
+			Info.DelegateName = BoundEvent->DelegatePropertyName.ToString();
+			if (BoundEvent->DelegateOwnerClass != nullptr)
+			{
+				Info.TargetClassPath = BoundEvent->DelegateOwnerClass->GetPathName();
+			}
+		}
+		else if (UK2Node_Event* Event = Cast<UK2Node_Event>(Node))
+		{
+			Info.MemberName = Event->GetFunctionName().ToString();
+		}
+		else if (UK2Node_Variable* Variable = Cast<UK2Node_Variable>(Node))
+		{
+			Info.MemberName = Variable->GetVarName().ToString();
+		}
+		if (UK2Node_MacroInstance* Macro = Cast<UK2Node_MacroInstance>(Node))
+		{
+			if (UEdGraph* MacroGraph = Macro->GetMacroGraph())
+			{
+				Info.SubGraphObjectPath = MacroGraph->GetPathName();
+			}
+		}
+		else if (UK2Node_Composite* Composite = Cast<UK2Node_Composite>(Node))
+		{
+			if (Composite->BoundGraph != nullptr)
+			{
+				Info.SubGraphObjectPath = Composite->BoundGraph->GetPathName();
+			}
+		}
 		Nodes.Add(Info);
+	}
+
+	if (bRecursive)
+	{
+		// Depth-first through collapsed sub-graphs, so one call covers the whole logic.
+		TSet<UEdGraph*> Visited;
+		Visited.Add(Graph);
+		TFunction<void(UEdGraph*)> Visit = [&Nodes, &Visited, &Visit](UEdGraph* Current)
+		{
+			if (Current == nullptr) return;
+			Nodes.Append(UEditorAutomationGraphLibrary::GetGraphNodes(Current, false));
+			for (UEdGraphNode* Node : Current->Nodes)
+			{
+				UEdGraph* SubGraph = nullptr;
+				if (UK2Node_MacroInstance* Macro = Cast<UK2Node_MacroInstance>(Node))
+				{
+					SubGraph = Macro->GetMacroGraph();
+				}
+				else if (UK2Node_Composite* Composite = Cast<UK2Node_Composite>(Node))
+				{
+					SubGraph = Composite->BoundGraph;
+				}
+				if (SubGraph != nullptr && !Visited.Contains(SubGraph))
+				{
+					Visited.Add(SubGraph);
+					Visit(SubGraph);
+				}
+			}
+		};
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			UEdGraph* SubGraph = nullptr;
+			if (UK2Node_MacroInstance* Macro = Cast<UK2Node_MacroInstance>(Node))
+			{
+				SubGraph = Macro->GetMacroGraph();
+			}
+			else if (UK2Node_Composite* Composite = Cast<UK2Node_Composite>(Node))
+			{
+				SubGraph = Composite->BoundGraph;
+			}
+			if (SubGraph != nullptr && !Visited.Contains(SubGraph))
+			{
+				Visited.Add(SubGraph);
+				Visit(SubGraph);
+			}
+		}
 	}
 	return Nodes;
 }
-
 TArray<FEditorAutomationGraphPinInfo> UEditorAutomationGraphLibrary::GetNodePins(UEdGraphNode* Node)
 {
 	TArray<FEditorAutomationGraphPinInfo> Pins;
@@ -272,9 +363,21 @@ TArray<FEditorAutomationGraphPinInfo> UEditorAutomationGraphLibrary::GetNodePins
 		Info.PinType = UEdGraphSchema_K2::TypeToText(Pin->PinType).ToString();
 		Info.DefaultValue = Pin->DefaultValue;
 		Info.bLinked = Pin->LinkedTo.Num() > 0;
+		Info.Category = Pin->PinType.PinCategory.ToString();
+		Info.TypeName = (Pin->PinType.PinSubCategoryObject != nullptr)
+			? Pin->PinType.PinSubCategoryObject->GetPathName()
+			: Pin->PinType.PinSubCategory.ToString();
+		if (Pin->DefaultObject != nullptr) Info.DefaultObjectPath = Pin->DefaultObject->GetPathName();
 		for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
 		{
-			if (LinkedPin != nullptr) Info.LinkedPinIds.Add(LinkedPin->PinId.ToString());
+			if (LinkedPin == nullptr) continue;
+			Info.LinkedPinIds.Add(LinkedPin->PinId.ToString());
+			if (LinkedPin->GetOwningNode() != nullptr)
+			{
+				Info.Connections.Add(FString::Printf(TEXT("%s::%s"),
+					*LinkedPin->GetOwningNode()->NodeGuid.ToString(EGuidFormats::Digits),
+					*LinkedPin->PinName.ToString()));
+			}
 		}
 		Pins.Add(Info);
 	}

@@ -40,6 +40,7 @@ namespace
 		Info.bBlueprintCallable = Function->HasAnyFunctionFlags(FUNC_BlueprintCallable);
 		Info.bBlueprintPure = Function->HasAnyFunctionFlags(FUNC_BlueprintPure);
 		Info.bStatic = Function->HasAnyFunctionFlags(FUNC_Static);
+		Info.ToolTip = Function->GetToolTipText().ToString();
 
 		for (TFieldIterator<FProperty> ParameterIt(Function); ParameterIt; ++ParameterIt)
 		{

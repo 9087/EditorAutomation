@@ -3,12 +3,15 @@
 #include "EditorAutomationUMGEditorLibrary.h"
 
 #include "Blueprint/UserWidget.h"
+#include "BaseWidgetBlueprint.h"
 #include "WidgetBlueprint.h"
 #include "WidgetBlueprintFactory.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/Package.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/ContentWidget.h"
+#include "Components/SlateWrapperTypes.h"
+#include "Components/TextBlock.h"
 #include "Components/PanelWidget.h"
 #include "Components/PanelSlot.h"
 #include "EditorAutomationCoreLibrary.h"
@@ -182,7 +185,17 @@ UWidget* UEditorAutomationUMGEditorLibrary::GetWidgetParent(UWidget* Widget)
 TArray<UWidget*> UEditorAutomationUMGEditorLibrary::GetWidgetChildren(UWidget* Widget)
 {
 	TArray<UWidget*> Children;
-	if (Widget == nullptr || Widget->IsA<UUserWidget>()) return Children;
+	if (Widget == nullptr) return Children;
+	// A UserWidget's design-time tree hangs off WidgetTree->RootWidget; returning
+	// empty hid NamedSlot content (the slot widget lives inside that tree).
+	if (UUserWidget* UserWidget = Cast<UUserWidget>(Widget))
+	{
+		if (UserWidget->WidgetTree != nullptr && UserWidget->WidgetTree->RootWidget != nullptr)
+		{
+			Children.Add(UserWidget->WidgetTree->RootWidget);
+		}
+		return Children;
+	}
 	if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
 	{
 		for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index) Children.Add(Panel->GetChildAt(Index));
@@ -365,4 +378,101 @@ bool UEditorAutomationUMGEditorLibrary::SetWidgetSlotProperty(
 	}
 	MarkOwningBlueprintDirty(Slot);
 	return true;
+}
+
+namespace
+{
+	/** Depth-first design-time widgets, including UUserWidget trees and NamedSlot content. */
+	void CollectDesignTimeWidgets(UWidget* Widget, TArray<UWidget*>& Out)
+	{
+		if (Widget == nullptr) return;
+		Out.Add(Widget);
+
+		TArray<UWidget*> Children;
+		if (UUserWidget* UserWidget = Cast<UUserWidget>(Widget))
+		{
+			if (UserWidget->WidgetTree != nullptr && UserWidget->WidgetTree->RootWidget != nullptr)
+			{
+				Children.Add(UserWidget->WidgetTree->RootWidget);
+			}
+		}
+		else if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
+		{
+			for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index)
+			{
+				Children.Add(Panel->GetChildAt(Index));
+			}
+		}
+		else if (UContentWidget* Content = Cast<UContentWidget>(Widget))
+		{
+			if (Content->GetContent() != nullptr) Children.Add(Content->GetContent());
+		}
+		for (UWidget* Child : Children)
+		{
+			CollectDesignTimeWidgets(Child, Out);
+		}
+	}
+
+	/** The user widget that owns a widget, walking up outers (or the widget itself). */
+	UUserWidget* OwningUserWidget(UWidget* Widget)
+	{
+		if (Widget == nullptr) return nullptr;
+		if (UUserWidget* Self = Cast<UUserWidget>(Widget)) return Self;
+		return Widget->GetTypedOuter<UUserWidget>();
+	}
+}
+
+bool UEditorAutomationUMGEditorLibrary::IsWidgetVariable(UWidget* Widget, UBlueprint* WidgetBlueprint)
+{
+	if (Widget == nullptr || WidgetBlueprint == nullptr || WidgetBlueprint->GeneratedClass == nullptr)
+	{
+		return false;
+	}
+	return FindFProperty<FProperty>(WidgetBlueprint->GeneratedClass, Widget->GetFName()) != nullptr;
+}
+
+UWidget* UEditorAutomationUMGEditorLibrary::GetUserWidgetRoot(UWidget* Widget)
+{
+	UUserWidget* UserWidget = OwningUserWidget(Widget);
+	if (UserWidget != nullptr && UserWidget->WidgetTree != nullptr)
+	{
+		return UserWidget->WidgetTree->RootWidget;
+	}
+	// Design-time template tree: there is no UUserWidget instance, so resolve the owning
+	// Widget Blueprint's tree root instead (that is what a template widget's "user root" is).
+	if (UBaseWidgetBlueprint* WidgetBlueprint = Widget != nullptr ? Widget->GetTypedOuter<UBaseWidgetBlueprint>() : nullptr)
+	{
+		if (WidgetBlueprint->WidgetTree != nullptr)
+		{
+			return WidgetBlueprint->WidgetTree->RootWidget;
+		}
+	}
+	return nullptr;
+}
+
+TArray<FEditorAutomationWidgetTextState> UEditorAutomationUMGEditorLibrary::GetWidgetTextActiveStates(UWidget* Widget)
+{
+	TArray<FEditorAutomationWidgetTextState> States;
+	if (Widget == nullptr)
+	{
+		return UMGEditorFailure<TArray<FEditorAutomationWidgetTextState>>(TEXT("GetWidgetTextActiveStates: Widget must not be null."));
+	}
+	const UEnum* VisibilityEnum = StaticEnum<ESlateVisibility>();
+	TArray<UWidget*> Widgets;
+	CollectDesignTimeWidgets(Widget, Widgets);
+	for (UWidget* Candidate : Widgets)
+	{
+		const UTextBlock* TextBlock = Cast<UTextBlock>(Candidate);
+		if (TextBlock == nullptr) continue;
+		FEditorAutomationWidgetTextState State;
+		State.WidgetPath = TextBlock->GetPathName();
+		State.Text = TextBlock->GetText().ToString();
+		State.Visibility = VisibilityEnum != nullptr
+			? VisibilityEnum->GetDisplayNameTextByValue(static_cast<int64>(TextBlock->GetVisibility())).ToString()
+			: FString();
+		State.bIsEnabled = TextBlock->GetIsEnabled();
+		State.bIsVisible = TextBlock->IsVisible();
+		States.Add(MoveTemp(State));
+	}
+	return States;
 }

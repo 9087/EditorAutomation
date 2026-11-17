@@ -80,6 +80,8 @@ struct FEditorAutomationFunctionInfo
 	UPROPERTY(BlueprintReadOnly) bool bStatic = false;
 	UPROPERTY(BlueprintReadOnly) TArray<FEditorAutomationParameterInfo> Parameters;
 	UPROPERTY(BlueprintReadOnly) FString ReturnType;
+	/** Editor tooltip of the function (empty when it has none). */
+	UPROPERTY(BlueprintReadOnly) FString ToolTip;
 };
 
 // ============================================================================
@@ -270,6 +272,8 @@ struct FEditorAutomationBatchCallEntry
 	UPROPERTY(BlueprintReadOnly) FString ReturnValueJson;
 	UPROPERTY(BlueprintReadOnly) FString OutParametersJson;
 	UPROPERTY(BlueprintReadOnly) FString ReturnType;
+	/** Editor tooltip of the function (empty when it has none). */
+	UPROPERTY(BlueprintReadOnly) FString ToolTip;
 };
 
 /** The outcome of one CallFunctions batch. */
@@ -328,6 +332,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
 	static bool StartPIE(const FString& LevelPath = TEXT(""), bool bNewWindow = false);
 
+
+
 	/**
 	 * Capture a screenshot into a PNG file.
 	 *
@@ -370,6 +376,7 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationPIE")
 	static bool SendKeyToPIE(const FString& KeyName, bool bFocusViewport = true);
+
 
 	// ------------------------------------------------------------------------
 	// Reflection

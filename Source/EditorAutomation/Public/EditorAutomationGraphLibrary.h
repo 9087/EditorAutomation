@@ -32,6 +32,16 @@ struct FEditorAutomationGraphNodeInfo
 	UPROPERTY(BlueprintReadOnly) FString NodeTitle;
 	UPROPERTY(BlueprintReadOnly) int32 NodePosX = 0;
 	UPROPERTY(BlueprintReadOnly) int32 NodePosY = 0;
+	/** Member/variable/event/function name the node refers to (empty when not applicable). */
+	UPROPERTY(BlueprintReadOnly) FString MemberName;
+	/** Graph this node belongs to (useful when the listing recurses into sub-graphs). */
+	UPROPERTY(BlueprintReadOnly) FString GraphObjectPath;
+	/** Owning class of the referenced function/variable (empty when unknown). */
+	UPROPERTY(BlueprintReadOnly) FString TargetClassPath;
+	/** Delegate property name for component-bound events (OnClicked etc.). */
+	UPROPERTY(BlueprintReadOnly) FString DelegateName;
+	/** Sub-graph (macro instance / collapsed composite) object path. */
+	UPROPERTY(BlueprintReadOnly) FString SubGraphObjectPath;
 };
 
 /** One pin of an editor graph node. */
@@ -46,6 +56,14 @@ struct FEditorAutomationGraphPinInfo
 	UPROPERTY(BlueprintReadOnly) FString PinType;
 	UPROPERTY(BlueprintReadOnly) FString DefaultValue;
 	UPROPERTY(BlueprintReadOnly) bool bLinked = false;
+	/** Pin category, e.g. "exec", "bool", "object". */
+	UPROPERTY(BlueprintReadOnly) FString Category;
+	/** Concrete Type name, e.g. "FVector" or an object path; empty for plain categories. */
+	UPROPERTY(BlueprintReadOnly) FString TypeName;
+	/** Default object path, when the pin default is an object reference. */
+	UPROPERTY(BlueprintReadOnly) FString DefaultObjectPath;
+	/** Linked pins as "NodeId::PinName" strings. */
+	UPROPERTY(BlueprintReadOnly) TArray<FString> Connections;
 	UPROPERTY(BlueprintReadOnly) TArray<FString> LinkedPinIds;
 };
 
@@ -59,7 +77,7 @@ public:
 	static TArray<FEditorAutomationBlueprintGraphInfo> GetBlueprintGraphs(const TSoftObjectPtr<UBlueprint>& Blueprint);
 
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static TArray<FEditorAutomationGraphNodeInfo> GetGraphNodes(UEdGraph* Graph);
+	static TArray<FEditorAutomationGraphNodeInfo> GetGraphNodes(UEdGraph* Graph, bool bRecursive = false);
 
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
 	static TArray<FEditorAutomationGraphPinInfo> GetNodePins(UEdGraphNode* Node);
@@ -158,4 +176,6 @@ public:
 	/** Remove every node of one class from a graph; returns the number of removed nodes (logged on failure). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
 	static int32 RemoveGraphNodesByClass(UEdGraph* Graph, const FString& NodeClassPath);
+
+
 };

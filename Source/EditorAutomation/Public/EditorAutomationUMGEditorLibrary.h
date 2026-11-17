@@ -6,9 +6,29 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "EditorAutomationUMGEditorLibrary.generated.h"
 
+class UBlueprint;
 class UWidget;
 class UPanelSlot;
 class UWidgetBlueprint;
+class UWidgetTree;
+
+/** One text widget and its current visual state. */
+USTRUCT(BlueprintType)
+struct FEditorAutomationWidgetTextState
+{
+	GENERATED_BODY()
+
+	/** Object path of the text widget. */
+	UPROPERTY(BlueprintReadOnly) FString WidgetPath;
+	/** Current text as a plain string. */
+	UPROPERTY(BlueprintReadOnly) FString Text;
+	/** ESlateVisibility display name, e.g. "Visible", "Collapsed", "Hidden". */
+	UPROPERTY(BlueprintReadOnly) FString Visibility;
+	/** Whether the widget is enabled (UWidget::GetIsEnabled). */
+	UPROPERTY(BlueprintReadOnly) bool bIsEnabled = true;
+	/** Whether the widget is currently visible (UWidget::IsVisible). */
+	UPROPERTY(BlueprintReadOnly) bool bIsVisible = false;
+};
 
 UCLASS()
 class EDITORAUTOMATION_API UEditorAutomationUMGEditorLibrary : public UBlueprintFunctionLibrary
@@ -80,4 +100,26 @@ public:
 		UPanelSlot* Slot,
 		const FString& PropertyPath,
 		const FString& ValueJson);
+
+
+
+
+	/**
+	 * Whether a widget name is exposed as a variable of one Widget Blueprint.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
+	static bool IsWidgetVariable(UWidget* Widget, UBlueprint* WidgetBlueprint);
+
+	/**
+	 * The root widget of the user widget that owns this widget (walking up outers).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
+	static UWidget* GetUserWidgetRoot(UWidget* Widget);
+
+
+	/**
+	 * Collect every UTextBlock in one subtree with its text and current visual state.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
+	static TArray<FEditorAutomationWidgetTextState> GetWidgetTextActiveStates(UWidget* Widget);
 };

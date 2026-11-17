@@ -200,7 +200,6 @@ bool UEditorAutomationCoreLibrary::FocusPIEViewport()
 	}
 	return true;
 }
-
 bool UEditorAutomationCoreLibrary::SendKeyToPIE(const FString& KeyName, bool bFocusViewport)
 {
 	if (!IsInGameThread() || GEngine == nullptr)
@@ -219,6 +218,8 @@ bool UEditorAutomationCoreLibrary::SendKeyToPIE(const FString& KeyName, bool bFo
 		return false;
 	}
 
+	// The modifier state is whatever Slate currently reports, matching the pre-existing
+	// behavior: for explicit modifiers use FocusPIEViewport() + the Input library's SendKey.
 	FSlateApplication& SlateApp = FSlateApplication::Get();
 	const FModifierKeysState ModifierKeys = SlateApp.GetModifierKeys();
 	FKeyEvent KeyDownEvent(Key, ModifierKeys, /*InUserIndex=*/0, /*bInIsRepeat=*/false, /*InCharacterCode=*/0, /*InKeyCode=*/0);

@@ -8,6 +8,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Subsystems/EditorAssetSubsystem.h"
+#include "UObject/UnrealType.h"
 #include "UObject/Package.h"
 
 namespace
@@ -178,4 +179,34 @@ bool UEditorAutomationBlueprintLibrary::CreateBlueprintFromParentPath(
 		return false;
 	}
 	return CreateBlueprint(AssetPath, TSoftClassPtr<UObject>(ParentClass), BlueprintType);
+}
+
+FString UEditorAutomationBlueprintLibrary::GetBlueprintLuaPath(UBlueprint* Blueprint)
+{
+	if (Blueprint == nullptr)
+	{
+		UE_LOG(LogEditorAutomation, Error, TEXT("GetBlueprintLuaPath: Blueprint must not be null."));
+		return FString();
+	}
+
+	// KGUI-style tools store the binding as a reflected property on the Blueprint or its
+	// generated class; look in both so the caller does not need to know which.
+	auto FindLuaPathOn = [](UObject* Container) -> FString
+	{
+		if (Container == nullptr) return FString();
+		for (TFieldIterator<FProperty> It(Container->GetClass()); It; ++It)
+		{
+			if (!It->GetName().Contains(TEXT("LuaPath"))) continue;
+			FString Value;
+			It->ExportTextItem_InContainer(Value, Container, nullptr, Container, PPF_None);
+			if (!Value.IsEmpty()) return Value;
+		}
+		return FString();
+	};
+	FString LuaPath = FindLuaPathOn(Blueprint);
+	if (LuaPath.IsEmpty() && Blueprint->GeneratedClass != nullptr)
+	{
+		LuaPath = FindLuaPathOn(Blueprint->GeneratedClass->GetDefaultObject(false));
+	}
+	return LuaPath;
 }
