@@ -2,6 +2,7 @@
 
 #include "EditorAutomationGraphLibrary.h"
 
+#include "EditorAutomationBlueprintLibrary.h"
 #include "EditorAutomationLog.h"
 
 #include "EdGraph/EdGraph.h"
@@ -35,11 +36,17 @@
 
 namespace
 {
-	template <typename ResultT>
-	ResultT GraphFailure(const FString& Message)
+	FEditorAutomationResult GraphFailure(const FString& Message)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("%s"), *Message);
-		return ResultT{};
+		return FEditorAutomationResult::Failure(EEditorAutomationResultCode::InvalidArgument, Message);
+	}
+
+	FEditorAutomationResult GraphFailure(
+		const EEditorAutomationResultCode Code,
+		const FString& Message,
+		const FString& Hint = FString())
+	{
+		return FEditorAutomationResult::Failure(Code, Message, Hint);
 	}
 
 
@@ -225,30 +232,42 @@ namespace
 	}
 }
 
-TArray<FEditorAutomationBlueprintGraphInfo> UEditorAutomationGraphLibrary::GetBlueprintGraphs(const TSoftObjectPtr<UBlueprint>& BlueprintRef)
+FEditorAutomationResult UEditorAutomationGraphLibrary::GetBlueprintGraphs(const TSoftObjectPtr<UBlueprint>& BlueprintRef, TArray<FEditorAutomationBlueprintGraphInfo>& OutGraphs)
 {
-	TArray<FEditorAutomationBlueprintGraphInfo> Graphs;
 	UBlueprint* Blueprint = BlueprintRef.LoadSynchronous();
-	if (Blueprint == nullptr) return Graphs;
-	const auto AddGraph = [&Graphs](UEdGraph* Graph)
+	if (Blueprint == nullptr)
+	{
+		// Remote Control binds only the object-path form of a soft object path; the shared
+		// resolver widens asset/package/class paths and reports its error through the envelope.
+		const FEditorAutomationResult Resolution =
+			UEditorAutomationBlueprintLibrary::ResolveBlueprintPath(BlueprintRef.ToString(), Blueprint);
+		if (!Resolution.bSuccess)
+		{
+			return Resolution;
+		}
+	}
+	const auto AddGraph = [&OutGraphs](UEdGraph* Graph)
 	{
 		if (Graph == nullptr) return;
 		FEditorAutomationBlueprintGraphInfo Info;
 		Info.GraphName = Graph->GetName();
 		Info.GraphClassPath = Graph->GetClass()->GetPathName();
 		Info.GraphObjectPath = Graph->GetPathName();
-		Graphs.Add(Info);
+		OutGraphs.Add(Info);
 	};
 	for (UEdGraph* Graph : Blueprint->UbergraphPages) AddGraph(Graph);
 	for (UEdGraph* Graph : Blueprint->FunctionGraphs) AddGraph(Graph);
 	for (UEdGraph* Graph : Blueprint->MacroGraphs) AddGraph(Graph);
-	return Graphs;
+	return FEditorAutomationResult::Success();
 }
 
-TArray<FEditorAutomationGraphNodeInfo> UEditorAutomationGraphLibrary::GetGraphNodes(UEdGraph* Graph, bool bRecursive)
+FEditorAutomationResult UEditorAutomationGraphLibrary::GetGraphNodes(UEdGraph* Graph, bool bRecursive, TArray<FEditorAutomationGraphNodeInfo>& OutNodes)
 {
 	TArray<FEditorAutomationGraphNodeInfo> Nodes;
-	if (Graph == nullptr) return Nodes;
+	if (Graph == nullptr)
+	{
+		return GraphFailure(EEditorAutomationResultCode::InvalidArgument, TEXT("Graph is null."), TEXT("Pass a UEdGraph object path from GetBlueprintGraphs."));
+	}
 
 	for (UEdGraphNode* Node : Graph->Nodes)
 	{
@@ -310,7 +329,11 @@ TArray<FEditorAutomationGraphNodeInfo> UEditorAutomationGraphLibrary::GetGraphNo
 		TFunction<void(UEdGraph*)> Visit = [&Nodes, &Visited, &Visit](UEdGraph* Current)
 		{
 			if (Current == nullptr) return;
-			Nodes.Append(UEditorAutomationGraphLibrary::GetGraphNodes(Current, false));
+			TArray<FEditorAutomationGraphNodeInfo> SubNodes;
+			if (UEditorAutomationGraphLibrary::GetGraphNodes(Current, false, SubNodes).bSuccess)
+			{
+				Nodes.Append(MoveTemp(SubNodes));
+			}
 			for (UEdGraphNode* Node : Current->Nodes)
 			{
 				UEdGraph* SubGraph = nullptr;
@@ -347,12 +370,16 @@ TArray<FEditorAutomationGraphNodeInfo> UEditorAutomationGraphLibrary::GetGraphNo
 			}
 		}
 	}
-	return Nodes;
+	OutNodes = MoveTemp(Nodes);
+	return FEditorAutomationResult::Success();
 }
-TArray<FEditorAutomationGraphPinInfo> UEditorAutomationGraphLibrary::GetNodePins(UEdGraphNode* Node)
+FEditorAutomationResult UEditorAutomationGraphLibrary::GetNodePins(UEdGraphNode* Node, TArray<FEditorAutomationGraphPinInfo>& OutPins)
 {
 	TArray<FEditorAutomationGraphPinInfo> Pins;
-	if (Node == nullptr) return Pins;
+	if (Node == nullptr)
+	{
+		return GraphFailure(EEditorAutomationResultCode::InvalidArgument, TEXT("Node is null."), TEXT("Pass a UEdGraphNode object path from GetGraphNodes."));
+	}
 	for (UEdGraphPin* Pin : Node->Pins)
 	{
 		if (Pin == nullptr) continue;
@@ -381,56 +408,64 @@ TArray<FEditorAutomationGraphPinInfo> UEditorAutomationGraphLibrary::GetNodePins
 		}
 		Pins.Add(Info);
 	}
-	return Pins;
+	OutPins = MoveTemp(Pins);
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationGraphLibrary::AddCallFunctionNode(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddCallFunctionNode(
 	UEdGraph* Graph,
 	const FString& FunctionOwnerClassPath,
 	const FString& FunctionName,
 	int32 NodePosX,
-	int32 NodePosY)
+	int32 NodePosY,
+	FString& OutNodeObjectPath)
 {
 	if (Graph == nullptr || FunctionName.IsEmpty())
 	{
-		return GraphFailure<FString>(TEXT("Graph and FunctionName are required."));
+		return GraphFailure(TEXT("Graph and FunctionName are required."));
 	}
 	UClass* OwnerClass = FunctionOwnerClassPath.IsEmpty() ? nullptr : LoadObject<UClass>(nullptr, *FunctionOwnerClassPath);
 	if (OwnerClass == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Owner class was not found."));
+		return GraphFailure(TEXT("Owner class was not found."));
 	}
 	UFunction* Function = OwnerClass->FindFunctionByName(FName(*FunctionName));
 	if (Function == nullptr)
 	{
-		return GraphFailure<FString>(FString::Printf(TEXT("Function '%s' was not found on '%s'."), *FunctionName, *OwnerClass->GetName()));
+		return GraphFailure(FString::Printf(TEXT("Function '%s' was not found on '%s'."), *FunctionName, *OwnerClass->GetName()));
 	}
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddCallFunctionNode")));
 	Graph->Modify();
 	UK2Node_CallFunction* Node = CreateCallFunctionNode(Graph, Function, OwnerClass, NodePosX, NodePosY);
 	FBlueprintEditorUtils::MarkBlueprintAsModified(FBlueprintEditorUtils::FindBlueprintForGraphChecked(Graph));
-	return Node != nullptr ? Node->GetPathName() : FString();
+	if (Node == nullptr)
+	{
+		return GraphFailure(EEditorAutomationResultCode::EditorRefused, TEXT("Could not create the call-function node."));
+	}
+	OutNodeObjectPath = Node->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationGraphLibrary::AddEventNode(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddEventNode(
 	UEdGraph* Graph,
 	const FString& EventName,
 	int32 NodePosX,
-	int32 NodePosY)
+	int32 NodePosY,
+	FString& OutNodeObjectPath)
 {
 	if (Graph == nullptr || EventName.IsEmpty())
 	{
-		return GraphFailure<FString>(TEXT("Graph and EventName are required."));
+		return GraphFailure(TEXT("Graph and EventName are required."));
 	}
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 	if (Blueprint == nullptr || Blueprint->ParentClass == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Graph does not belong to a Blueprint."));
+		return GraphFailure(TEXT("Graph does not belong to a Blueprint."));
 	}
 	UFunction* Function = Blueprint->ParentClass->FindFunctionByName(FName(*EventName));
 	if (Function == nullptr)
 	{
-		return GraphFailure<FString>(FString::Printf(TEXT("Event function '%s' was not found."), *EventName));
+		return GraphFailure(FString::Printf(TEXT("Event function '%s' was not found."), *EventName));
 	}
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddEventNode")));
 	Graph->Modify();
@@ -442,22 +477,24 @@ FString UEditorAutomationGraphLibrary::AddEventNode(
 	Node->NodePosY = NodePosY;
 	Creator.Finalize();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return Node->GetPathName();
+	OutNodeObjectPath = Node->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationGraphLibrary::AddComponentBoundEventNode(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddComponentBoundEventNode(
 	UEdGraph* Graph,
 	const FString& WidgetName,
-	const FString& DelegateName)
+	const FString& DelegateName,
+	FString& OutNodeObjectPath)
 {
 	if (Graph == nullptr || WidgetName.IsEmpty() || DelegateName.IsEmpty())
 	{
-		return GraphFailure<FString>(TEXT("Graph, WidgetName and DelegateName are required."));
+		return GraphFailure(TEXT("Graph, WidgetName and DelegateName are required."));
 	}
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 	if (Blueprint == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Graph does not belong to a Blueprint."));
+		return GraphFailure(TEXT("Graph does not belong to a Blueprint."));
 	}
 
 	// Widgets/components become Blueprint variables (object properties) only when bIsVariable is set and the
@@ -465,7 +502,7 @@ FString UEditorAutomationGraphLibrary::AddComponentBoundEventNode(
 	FObjectProperty* ComponentProperty = CastField<FObjectProperty>(FindBlueprintMemberProperty(Blueprint, FName(*WidgetName)));
 	if (ComponentProperty == nullptr)
 	{
-		return GraphFailure<FString>(FString::Printf(
+		return GraphFailure(FString::Printf(
 				TEXT("Component/widget variable '%s' was not found on Blueprint '%s'. Set bIsVariable=true on the widget and compile the Blueprint first."),
 				*WidgetName,
 				*Blueprint->GetName()));
@@ -475,12 +512,12 @@ FString UEditorAutomationGraphLibrary::AddComponentBoundEventNode(
 		: nullptr;
 	if (DelegateOwnerClass == nullptr)
 	{
-		return GraphFailure<FString>(FString::Printf(TEXT("Component/widget variable '%s' has no object class."), *WidgetName));
+		return GraphFailure(FString::Printf(TEXT("Component/widget variable '%s' has no object class."), *WidgetName));
 	}
 	FMulticastDelegateProperty* DelegateProperty = FindFProperty<FMulticastDelegateProperty>(DelegateOwnerClass, FName(*DelegateName));
 	if (DelegateProperty == nullptr)
 	{
-		return GraphFailure<FString>(FString::Printf(TEXT("Delegate '%s' was not found on class '%s'."), *DelegateName, *DelegateOwnerClass->GetName()));
+		return GraphFailure(FString::Printf(TEXT("Delegate '%s' was not found on class '%s'."), *DelegateName, *DelegateOwnerClass->GetName()));
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddComponentBoundEventNode")));
@@ -496,25 +533,27 @@ FString UEditorAutomationGraphLibrary::AddComponentBoundEventNode(
 		});
 	if (Node == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Could not create the component bound event node."));
+		return GraphFailure(TEXT("Could not create the component bound event node."));
 	}
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return Node->GetPathName();
+	OutNodeObjectPath = Node->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationGraphLibrary::AddBranchNode(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddBranchNode(
 	UEdGraph* Graph,
 	int32 NodePosX,
-	int32 NodePosY)
+	int32 NodePosY,
+	FString& OutNodeObjectPath)
 {
 	if (Graph == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Graph is required."));
+		return GraphFailure(TEXT("Graph is required."));
 	}
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 	if (Blueprint == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Graph does not belong to a Blueprint."));
+		return GraphFailure(TEXT("Graph does not belong to a Blueprint."));
 	}
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddBranchNode")));
 	Graph->Modify();
@@ -524,21 +563,23 @@ FString UEditorAutomationGraphLibrary::AddBranchNode(
 	Node->NodePosY = NodePosY;
 	Creator.Finalize();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return Node->GetPathName();
+	OutNodeObjectPath = Node->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationGraphLibrary::AddVariableGetNode(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddVariableGetNode(
 	UEdGraph* Graph,
-	const FString& VariableName)
+	const FString& VariableName,
+	FString& OutNodeObjectPath)
 {
 	if (Graph == nullptr || VariableName.IsEmpty())
 	{
-		return GraphFailure<FString>(TEXT("Graph and VariableName are required."));
+		return GraphFailure(TEXT("Graph and VariableName are required."));
 	}
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 	if (Blueprint == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Graph does not belong to a Blueprint."));
+		return GraphFailure(TEXT("Graph does not belong to a Blueprint."));
 	}
 	const FName VariableFName(*VariableName);
 	FProperty* VariableProperty = FindBlueprintMemberProperty(Blueprint, VariableFName);
@@ -553,7 +594,7 @@ FString UEditorAutomationGraphLibrary::AddVariableGetNode(
 	}
 	if (VariableProperty == nullptr && !bIsBlueprintVariable)
 	{
-		return GraphFailure<FString>(FString::Printf(TEXT("Variable '%s' was not found on Blueprint '%s'."), *VariableName, *Blueprint->GetName()));
+		return GraphFailure(FString::Printf(TEXT("Variable '%s' was not found on Blueprint '%s'."), *VariableName, *Blueprint->GetName()));
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddVariableGetNode")));
@@ -576,21 +617,23 @@ FString UEditorAutomationGraphLibrary::AddVariableGetNode(
 	Node->NodePosY = FMath::RoundToInt(Place.Y);
 	Creator.Finalize();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return Node->GetPathName();
+	OutNodeObjectPath = Node->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationGraphLibrary::AddVariableSetNode(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddVariableSetNode(
 	UEdGraph* Graph,
-	const FString& VariableName)
+	const FString& VariableName,
+	FString& OutNodeObjectPath)
 {
 	if (Graph == nullptr || VariableName.IsEmpty())
 	{
-		return GraphFailure<FString>(TEXT("Graph and VariableName are required."));
+		return GraphFailure(TEXT("Graph and VariableName are required."));
 	}
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 	if (Blueprint == nullptr)
 	{
-		return GraphFailure<FString>(TEXT("Graph does not belong to a Blueprint."));
+		return GraphFailure(TEXT("Graph does not belong to a Blueprint."));
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddVariableSetNode")));
@@ -600,34 +643,47 @@ FString UEditorAutomationGraphLibrary::AddVariableSetNode(
 	UEdGraphNode* Node = CreateVariableNode(Graph, FName(*VariableName), /*bSet=*/true, CreateError);
 	if (Node == nullptr)
 	{
-		return GraphFailure<FString>(CreateError);
+		return GraphFailure(CreateError);
 	}
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return Node->GetPathName();
+	OutNodeObjectPath = Node->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationGraphLibrary::AddBlueprintVariable(
+FEditorAutomationResult UEditorAutomationGraphLibrary::AddBlueprintVariable(
 	const TSoftObjectPtr<UBlueprint>& BlueprintRef,
 	const FString& VariableName,
 	const FString& TypeString)
 {
-	UBlueprint* Blueprint = BlueprintRef.IsNull() ? nullptr : BlueprintRef.LoadSynchronous();
+	UBlueprint* Blueprint = BlueprintRef.LoadSynchronous();
 	if (Blueprint == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Blueprint could not be loaded."));
+		// Remote Control binds a package-only soft path when the caller passes an asset path.
+		const FEditorAutomationResult Resolution =
+			UEditorAutomationBlueprintLibrary::ResolveBlueprintPath(BlueprintRef.ToString(), Blueprint);
+		if (!Resolution.bSuccess)
+		{
+			return Resolution;
+		}
+	}
+	if (Blueprint == nullptr)
+	{
+		return GraphFailure(FString::Printf(
+			TEXT("AddBlueprintVariable: Blueprint '%s' could not be loaded (pass /Game/Dir/Asset or /Game/Dir/Asset.Asset)."),
+			BlueprintRef.IsNull() ? TEXT("") : *BlueprintRef.ToString()));
 	}
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationAddBlueprintVariable")));
 	Blueprint->Modify();
 	FString AddError;
 	if (!AddBlueprintVariableInternal(Blueprint, VariableName, TypeString, AddError))
 	{
-		return GraphFailure<bool>(AddError);
+		return GraphFailure(AddError);
 	}
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationGraphLibrary::ConnectPins(
+FEditorAutomationResult UEditorAutomationGraphLibrary::ConnectPins(
 	UEdGraphNode* FromNode,
 	const FString& FromPinName,
 	UEdGraphNode* ToNode,
@@ -637,16 +693,16 @@ bool UEditorAutomationGraphLibrary::ConnectPins(
 	UEdGraphPin* InputPin = FindPin(ToNode, ToPinName, EGPD_Input);
 	if (OutputPin == nullptr || InputPin == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Output or input pin was not found."));
+		return GraphFailure(TEXT("Output or input pin was not found."));
 	}
 	if (!FromNode->GetGraph()->GetSchema()->TryCreateConnection(OutputPin, InputPin))
 	{
-		return GraphFailure<bool>(TEXT("Schema rejected the connection."));
+		return GraphFailure(TEXT("Schema rejected the connection."));
 	}
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationGraphLibrary::SetPinDefaultValue(
+FEditorAutomationResult UEditorAutomationGraphLibrary::SetPinDefaultValue(
 	UEdGraphNode* Node,
 	const FString& PinName,
 	const FString& DefaultValue)
@@ -654,21 +710,21 @@ bool UEditorAutomationGraphLibrary::SetPinDefaultValue(
 	UEdGraphPin* Pin = FindPin(Node, PinName, EGPD_Input);
 	if (Pin == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Input pin was not found."));
+		return GraphFailure(TEXT("Input pin was not found."));
 	}
 	Pin->DefaultValue = DefaultValue;
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationGraphLibrary::SetNodePosition(UEdGraphNode* Node, int32 NodePosX, int32 NodePosY)
+FEditorAutomationResult UEditorAutomationGraphLibrary::SetNodePosition(UEdGraphNode* Node, int32 NodePosX, int32 NodePosY)
 {
-	if (Node == nullptr) return GraphFailure<bool>(TEXT("Node is null."));
+	if (Node == nullptr) return GraphFailure(TEXT("Node is null."));
 	Node->NodePosX = NodePosX;
 	Node->NodePosY = NodePosY;
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationGraphLibrary::SetPinDefaultObject(
+FEditorAutomationResult UEditorAutomationGraphLibrary::SetPinDefaultObject(
 	UEdGraphNode* Node,
 	const FString& PinName,
 	const FString& ObjectPath)
@@ -676,7 +732,7 @@ bool UEditorAutomationGraphLibrary::SetPinDefaultObject(
 	UEdGraphPin* Pin = FindPin(Node, PinName, EGPD_Input);
 	if (Pin == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Input pin was not found."));
+		return GraphFailure(TEXT("Input pin was not found."));
 	}
 	UObject* Object = FindObject<UObject>(nullptr, *ObjectPath);
 	if (Object == nullptr)
@@ -685,44 +741,45 @@ bool UEditorAutomationGraphLibrary::SetPinDefaultObject(
 	}
 	if (Object == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Default object was not found."));
+		return GraphFailure(TEXT("Default object was not found."));
 	}
 	Pin->DefaultObject = Object;
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationGraphLibrary::RemoveGraphNode(UEdGraphNode* Node)
+FEditorAutomationResult UEditorAutomationGraphLibrary::RemoveGraphNode(UEdGraphNode* Node)
 {
 	if (Node == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Node is null."));
+		return GraphFailure(TEXT("Node is null."));
 	}
 	UEdGraph* Graph = Node->GetGraph();
 	UBlueprint* Blueprint = Graph != nullptr ? FBlueprintEditorUtils::FindBlueprintForGraph(Graph) : nullptr;
 	if (Graph == nullptr || Blueprint == nullptr)
 	{
-		return GraphFailure<bool>(TEXT("Node does not belong to a Blueprint graph."));
+		return GraphFailure(TEXT("Node does not belong to a Blueprint graph."));
 	}
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationRemoveGraphNode")));
 	Blueprint->Modify();
 	Graph->Modify();
 	Graph->RemoveNode(Node);
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-int32 UEditorAutomationGraphLibrary::RemoveGraphNodesByClass(
+FEditorAutomationResult UEditorAutomationGraphLibrary::RemoveGraphNodesByClass(
 	UEdGraph* Graph,
-	const FString& NodeClassPath)
+	const FString& NodeClassPath,
+	int32& OutRemovedCount)
 {
 	if (Graph == nullptr || NodeClassPath.IsEmpty())
 	{
-		return GraphFailure<int32>(TEXT("Graph and NodeClassPath are required."));
+		return GraphFailure(TEXT("Graph and NodeClassPath are required."));
 	}
 	UClass* NodeClass = LoadObject<UClass>(nullptr, *NodeClassPath);
 	if (NodeClass == nullptr || !NodeClass->IsChildOf(UEdGraphNode::StaticClass()))
 	{
-		return GraphFailure<int32>(FString::Printf(TEXT("'%s' is not a graph node class."), *NodeClassPath));
+		return GraphFailure(FString::Printf(TEXT("'%s' is not a graph node class."), *NodeClassPath));
 	}
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 
@@ -736,7 +793,8 @@ int32 UEditorAutomationGraphLibrary::RemoveGraphNodesByClass(
 	}
 	if (NodesToRemove.IsEmpty())
 	{
-		return 0;
+		OutRemovedCount = 0;
+		return FEditorAutomationResult::Success();
 	}
 
 	FScopedTransaction Transaction(FText::FromString(TEXT("EditorAutomationRemoveGraphNodesByClass")));
@@ -750,5 +808,6 @@ int32 UEditorAutomationGraphLibrary::RemoveGraphNodesByClass(
 	{
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 	}
-	return NodesToRemove.Num();
+	OutRemovedCount = NodesToRemove.Num();
+	return FEditorAutomationResult::Success();
 }

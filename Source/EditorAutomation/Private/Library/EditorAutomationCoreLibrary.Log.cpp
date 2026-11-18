@@ -5,13 +5,13 @@
 #include "EditorAutomationLogCapture.h"
 #include "Logging/LogVerbosity.h"
 
-FEditorAutomationLogPage UEditorAutomationCoreLibrary::GetRecentLog(
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetRecentLog(
 	const int32 MaxLines,
 	const int32 MinVerbosity,
 	const FString& CategoryFilter,
-	const bool bClear)
+	const bool bClear,
+	FEditorAutomationLogPage& OutPage)
 {
-	FEditorAutomationLogPage Page;
 	const int32 ClampedVerbosity = FMath::Clamp(
 		MinVerbosity,
 		static_cast<int32>(ELogVerbosity::Fatal),
@@ -21,8 +21,8 @@ FEditorAutomationLogPage UEditorAutomationCoreLibrary::GetRecentLog(
 		ClampedVerbosity,
 		CategoryFilter,
 		bClear,
-		Page.Entries,
-		Page.TotalRecorded,
-		Page.bTruncated);
-	return Page;
+		OutPage.Entries,
+		OutPage.TotalRecorded,
+		OutPage.bTruncated);
+	return FEditorAutomationResult::Success();
 }

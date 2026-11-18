@@ -2,7 +2,7 @@
 
 #include "EditorAutomationInputLibrary.h"
 
-#include "EditorAutomationLog.h"
+#include "EditorAutomationCoreLibrary.h"
 
 #include "Blueprint/UserWidget.h"
 #include "Components/Widget.h"
@@ -24,11 +24,11 @@ namespace
 	/**
 	 * Resolve one widget's Slate widget and painted geometry.
 	 *
-	 * A widget's geometry (and its hit-test entry) are written by Slate's paint
-	 * pass, so a widget that was never drawn reports "not ready" instead of
-	 * receiving input aimed at a degenerate point.
+	 * A widget's geometry (and its hit-test entry) are written by Slate's paint pass, so a
+	 * widget that was never drawn reports NotReady instead of receiving input at a degenerate
+	 * point; every failure carries its reason in the envelope.
 	 */
-	bool ResolvePaintedWidget(
+	FEditorAutomationResult ResolvePaintedWidget(
 		UWidget* Widget,
 		const TCHAR* FunctionName,
 		TSharedPtr<SWidget>& OutSlateWidget,
@@ -36,31 +36,35 @@ namespace
 	{
 		if (!IsInGameThread())
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("%s must be called on the game thread."), FunctionName);
-			return false;
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::NotReady,
+				FString::Printf(TEXT("%s must be called on the game thread."), FunctionName),
+				TEXT("Retry from the editor's game thread."));
 		}
 		if (Widget == nullptr)
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("%s: Widget must not be null."), FunctionName);
-			return false;
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::InvalidArgument,
+				FString::Printf(TEXT("%s: widget is null."), FunctionName),
+				TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
 		}
 		OutSlateWidget = Widget->GetCachedWidget();
 		if (!OutSlateWidget.IsValid())
 		{
-			UE_LOG(LogEditorAutomation, Error,
-				TEXT("%s: widget '%s' has no cached Slate widget; ensure it is constructed and visible."),
-				FunctionName, *Widget->GetPathName());
-			return false;
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::NotReady,
+				FString::Printf(TEXT("%s: widget '%s' has no cached Slate widget."), FunctionName, *Widget->GetPathName()),
+				TEXT("Ensure the widget is constructed and visible, then retry."));
 		}
 		OutGeometry = &OutSlateWidget->GetCachedGeometry();
 		if (OutGeometry->GetAbsoluteSize().IsNearlyZero())
 		{
-			UE_LOG(LogEditorAutomation, Error,
-				TEXT("%s: widget '%s' has no painted geometry yet (zero size); retry after the next frame."),
-				FunctionName, *Widget->GetPathName());
-			return false;
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::NotReady,
+				FString::Printf(TEXT("%s: widget '%s' has no painted geometry yet (zero size)."), FunctionName, *Widget->GetPathName()),
+				TEXT("Wait for the next paint/frame pass, then retry."));
 		}
-		return true;
+		return FEditorAutomationResult::Success();
 	}
 
 	/** Bring the owning window to the front; returns its native window when found. */
@@ -73,6 +77,14 @@ namespace
 			NativeWindow = FoundWindow->GetNativeWindow();
 		}
 		return NativeWindow;
+	}
+
+	FEditorAutomationResult MouseInputBusy(const TCHAR* FunctionName)
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("%s: a mouse input is already in progress."), FunctionName),
+			TEXT("Wait for IsMouseInputPending to report false, then retry."));
 	}
 }
 
@@ -95,28 +107,32 @@ FModifierKeysState FEditorAutomationModifierKeys::ToSlate() const
 		false);
 }
 
-bool UEditorAutomationInputLibrary::SendClick(UWidget* Widget, const FEditorAutomationSendClickOptions& Options)
+FEditorAutomationResult UEditorAutomationInputLibrary::SendClick(
+	UWidget* Widget,
+	const FEditorAutomationSendClickOptions& Options)
 {
 	if (bMouseDragInProgress)
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("SendClick: a mouse input is already in progress; wait for IsMouseInputPending to clear."));
-		return false;
+		return MouseInputBusy(TEXT("SendClick"));
 	}
 
 	TSharedPtr<SWidget> SlateWidget;
 	const FGeometry* Geometry = nullptr;
-	if (!ResolvePaintedWidget(Widget, TEXT("SendClick"), SlateWidget, Geometry))
+	const FEditorAutomationResult Resolved = ResolvePaintedWidget(Widget, TEXT("SendClick"), SlateWidget, Geometry);
+	if (!Resolved.bSuccess)
 	{
-		return false;
+		return Resolved;
 	}
 
 	const FKey ButtonKey(*Options.Button);
 	if (!ButtonKey.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendClick: '%s' is not a valid mouse-button FKey name."), *Options.Button);
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("SendClick: '%s' is not a valid mouse-button FKey name."), *Options.Button),
+			TEXT("Pass an FKey name such as LeftMouseButton or RightMouseButton."));
 	}
+
 	const FVector2D Clamped(
 		FMath::Clamp(Options.RelativePosition.X, 0.f, 1.f),
 		FMath::Clamp(Options.RelativePosition.Y, 0.f, 1.f));
@@ -125,8 +141,8 @@ bool UEditorAutomationInputLibrary::SendClick(UWidget* Widget, const FEditorAuto
 	const FModifierKeysState ModifierState = Options.ModifierKeys.ToSlate();
 	const TSharedPtr<FGenericWindow> NativeWindow = BringOwnerToFront(SlateWidget);
 
-	// Position the cursor directly at the click point; an off-screen detour
-	// degrades Slate's hover/pointer state over repeated synthetic inputs.
+	// Position the cursor directly at the click point; an off-screen detour degrades
+	// Slate's hover/pointer state over repeated synthetic inputs.
 	const TSet<FKey> NoButtons;
 	FPointerEvent MoveEvent(FInputDeviceId::CreateFromInternalId(0), 0,
 		ClickPoint, ClickPoint, NoButtons, FKey(), 0.f, ModifierState);
@@ -147,85 +163,98 @@ bool UEditorAutomationInputLibrary::SendClick(UWidget* Widget, const FEditorAuto
 		FSlateApplication::Get().ProcessMouseButtonDoubleClickEvent(NativeWindow, DoubleClickEvent);
 		FSlateApplication::Get().ProcessMouseButtonUpEvent(MouseUpEvent);
 	}
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::Focus(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationInputLibrary::Focus(UWidget* Widget)
 {
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("Focus must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("Focus must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	if (Widget == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("Focus: Widget must not be null."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Focus: widget is null."),
+			TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
 	}
 	const TSharedPtr<SWidget> SlateWidget = Widget->GetCachedWidget();
 	if (!SlateWidget.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("Focus: widget '%s' has no cached Slate widget; ensure it is constructed and visible."),
-			*Widget->GetPathName());
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Focus: widget '%s' has no cached Slate widget."), *Widget->GetPathName()),
+			TEXT("Ensure the widget is constructed and visible, then retry."));
 	}
 	BringOwnerToFront(SlateWidget);
 	FSlateApplication::Get().SetKeyboardFocus(SlateWidget, EFocusCause::SetDirectly);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::SendKey(const FString& KeyName, const FEditorAutomationModifierKeys& Modifiers)
+FEditorAutomationResult UEditorAutomationInputLibrary::SendKey(
+	const FString& KeyName,
+	const FEditorAutomationModifierKeys& Modifiers)
 {
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendKey must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("SendKey must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	const FKey Key(*KeyName);
 	if (!Key.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendKey: '%s' is not a valid FKey name."), *KeyName);
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("SendKey: '%s' is not a valid FKey name."), *KeyName),
+			TEXT("Pass an FKey name such as Enter, SpaceBar, Tab, Escape, Up, Down, Left, Right, W, A, S, D or R."));
 	}
 	const FModifierKeysState ModifierState = Modifiers.ToSlate();
 	FKeyEvent KeyDownEvent(Key, ModifierState, 0, false, 0, 0);
 	FKeyEvent KeyUpEvent(Key, ModifierState, 0, false, 0, 0);
 	FSlateApplication::Get().ProcessKeyDownEvent(KeyDownEvent);
 	FSlateApplication::Get().ProcessKeyUpEvent(KeyUpEvent);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::SendText(const FString& Text)
+FEditorAutomationResult UEditorAutomationInputLibrary::SendText(const FString& Text)
 {
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendText must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("SendText must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	for (const TCHAR Char : Text)
 	{
 		FCharacterEvent CharEvent(Char, FModifierKeysState(), 0, false);
 		FSlateApplication::Get().ProcessKeyCharEvent(CharEvent);
 	}
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::SendMouseMove(
-	UWidget* Widget, FVector2D RelativePosition, const FEditorAutomationModifierKeys& ModifierKeys)
+FEditorAutomationResult UEditorAutomationInputLibrary::SendMouseMove(
+	UWidget* Widget,
+	const FVector2D RelativePosition,
+	const FEditorAutomationModifierKeys& ModifierKeys)
 {
 	if (bMouseDragInProgress)
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("SendMouseMove: a mouse input is already in progress; wait for IsMouseInputPending to clear."));
-		return false;
+		return MouseInputBusy(TEXT("SendMouseMove"));
 	}
 
 	TSharedPtr<SWidget> SlateWidget;
 	const FGeometry* Geometry = nullptr;
-	if (!ResolvePaintedWidget(Widget, TEXT("SendMouseMove"), SlateWidget, Geometry))
+	const FEditorAutomationResult Resolved = ResolvePaintedWidget(Widget, TEXT("SendMouseMove"), SlateWidget, Geometry);
+	if (!Resolved.bSuccess)
 	{
-		return false;
+		return Resolved;
 	}
 
 	const FVector2D Clamped(
@@ -238,33 +267,36 @@ bool UEditorAutomationInputLibrary::SendMouseMove(
 	FPointerEvent MoveEvent(FInputDeviceId::CreateFromInternalId(0), 0,
 		Point, Point, NoButtons, FKey(), 0.f, ModifierKeys.ToSlate());
 	FSlateApplication::Get().ProcessMouseMoveEvent(MoveEvent);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::SendMouseWheel(UWidget* Widget, float Delta)
+FEditorAutomationResult UEditorAutomationInputLibrary::SendMouseWheel(UWidget* Widget, const float Delta)
 {
 	if (bMouseDragInProgress)
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("SendMouseWheel: a mouse input is already in progress; wait for IsMouseInputPending to clear."));
-		return false;
+		return MouseInputBusy(TEXT("SendMouseWheel"));
 	}
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendMouseWheel must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("SendMouseWheel must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	if (Widget == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendMouseWheel: Widget must not be null."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("SendMouseWheel: widget is null."),
+			TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
 	}
 	const TSharedPtr<SWidget> SlateWidget = Widget->GetCachedWidget();
 	if (!SlateWidget.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("SendMouseWheel: widget '%s' has no cached Slate widget."), *Widget->GetPathName());
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("SendMouseWheel: widget '%s' has no cached Slate widget."), *Widget->GetPathName()),
+			TEXT("Ensure the widget is constructed and visible, then retry."));
 	}
 	BringOwnerToFront(SlateWidget);
 
@@ -274,31 +306,35 @@ bool UEditorAutomationInputLibrary::SendMouseWheel(UWidget* Widget, float Delta)
 		FSlateApplication::Get().GetCursorPos(), FSlateApplication::Get().GetCursorPos(),
 		NoButtons, EKeys::Invalid, Delta, FModifierKeysState());
 	FSlateApplication::Get().ProcessMouseWheelOrGestureEvent(WheelEvent, nullptr);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::SendDrag(UWidget* Widget, const FEditorAutomationSendDragOptions& Options)
+FEditorAutomationResult UEditorAutomationInputLibrary::SendDrag(
+	UWidget* Widget,
+	const FEditorAutomationSendDragOptions& Options)
 {
 	if (bMouseDragInProgress)
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("SendDrag: a mouse input is already in progress; wait for IsMouseInputPending to clear."));
-		return false;
+		return MouseInputBusy(TEXT("SendDrag"));
 	}
 
 	TSharedPtr<SWidget> SlateWidget;
 	const FGeometry* Geometry = nullptr;
-	if (!ResolvePaintedWidget(Widget, TEXT("SendDrag"), SlateWidget, Geometry))
+	const FEditorAutomationResult Resolved = ResolvePaintedWidget(Widget, TEXT("SendDrag"), SlateWidget, Geometry);
+	if (!Resolved.bSuccess)
 	{
-		return false;
+		return Resolved;
 	}
 
 	const FKey ButtonKey(*Options.Button);
 	if (!ButtonKey.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendDrag: '%s' is not a valid mouse-button FKey name."), *Options.Button);
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("SendDrag: '%s' is not a valid mouse-button FKey name."), *Options.Button),
+			TEXT("Pass an FKey name such as LeftMouseButton or RightMouseButton."));
 	}
+
 	const FVector2D ClampFrom(
 		FMath::Clamp(Options.FromRelativePosition.X, 0.f, 1.f),
 		FMath::Clamp(Options.FromRelativePosition.Y, 0.f, 1.f));
@@ -389,10 +425,11 @@ bool UEditorAutomationInputLibrary::SendDrag(UWidget* Widget, const FEditorAutom
 				return false;
 			}),
 		Interval);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationInputLibrary::IsMouseInputPending()
+FEditorAutomationResult UEditorAutomationInputLibrary::IsMouseInputPending(bool& OutPending)
 {
-	return bMouseDragInProgress;
+	OutPending = bMouseDragInProgress;
+	return FEditorAutomationResult::Success();
 }

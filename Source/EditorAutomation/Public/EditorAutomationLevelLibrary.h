@@ -4,6 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+
+#include "EditorAutomationCoreLibrary.h"
+
 #include "EditorAutomationLevelLibrary.generated.h"
 
 class ULevelScriptBlueprint;
@@ -25,27 +28,30 @@ class EDITORAUTOMATION_API UEditorAutomationLevelLibrary : public UBlueprintFunc
 	GENERATED_BODY()
 
 public:
-	/** Create a Level asset; returns false (and logs the reason) when the editor refuses. */
+	/** Create a Level asset. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationLevel")
-	static bool CreateLevel(
+	static FEditorAutomationResult CreateLevel(
 		const FString& LevelPath,
 		const FString& TemplatePath = TEXT(""),
 		bool bPartitioned = false);
 
-	/** Open a Level asset in the editor; returns false (and logs the reason) when it cannot load. */
+	/** Open a Level asset in the editor. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationLevel")
-	static bool OpenLevel(const FString& LevelPath);
+	static FEditorAutomationResult OpenLevel(const FString& LevelPath);
 
-	/** Save the current Level; returns false (and logs the reason) when the editor refuses. */
+	/** Save the current Level. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationLevel")
-	static bool SaveCurrentLevel();
+	static FEditorAutomationResult SaveCurrentLevel();
 
+	/** Describe the current editor Level. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationLevel")
-	static FEditorAutomationLevelInfo GetCurrentLevelInfo();
+	static FEditorAutomationResult GetCurrentLevelInfo(FEditorAutomationLevelInfo& OutInfo);
 
+	/** Whether the current editor Level has unsaved changes. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationLevel")
-	static bool IsCurrentLevelDirty();
+	static FEditorAutomationResult IsCurrentLevelDirty(bool& OutDirty);
 
+	/** The current Level's Level Script Blueprint, when it has one. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationLevel")
-	static ULevelScriptBlueprint* GetLevelScriptBlueprint();
+	static FEditorAutomationResult GetLevelScriptBlueprint(ULevelScriptBlueprint*& OutBlueprint);
 };

@@ -5,19 +5,16 @@
 // Every function is called directly from C++ (the Remote Control HTTP transport is another process'
 // concern); the fixtures are engine CDOs, so no editor world or user content is required.
 //
-// The API has no per-function error envelope: a failed call returns an empty value (or false and an
-// empty read) and logs the reason through LogEditorAutomation. These tests therefore assert data and success
-// flags rather than error codes; the log itself is covered by the CallFunction/GetRecentLog tests.
+// Every RC-facing function returns FEditorAutomationResult (success/error/hint) and reports its data
+// through a trailing out parameter. CallFunction/CallFunctions keep their own result envelopes.
 
 #include "Misc/AutomationTest.h"
 
 #include "EditorAutomationCoreLibrary.h"
-#include "EditorAutomationLog.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Logging/LogVerbosity.h"
 #include "Misc/App.h"
-#include "Misc/EngineVersion.h"
 #include "Misc/Paths.h"
 
 #include "UObject/Class.h"
@@ -58,7 +55,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationPingTest::RunTest(const FString& Parameters)
 {
-	TestEqual(TEXT("Ping answers pong"), UEditorAutomationCoreLibrary::Ping(), FString(TEXT("pong")));
+	FString Value;
+	const FEditorAutomationResult Result = UEditorAutomationCoreLibrary::Ping(Value);
+	TestTrue(TEXT("Ping succeeds"), Result.bSuccess);
+	TestEqual(TEXT("Ping answers pong"), Value, FString(TEXT("pong")));
 
 	UClass* LibraryClass = LoadObject<UClass>(nullptr, TEXT("/Script/EditorAutomation.EditorAutomationCoreLibrary"));
 	TestNotNull(TEXT("The library class resolves in the merged module"), LibraryClass);
@@ -80,7 +80,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetEditorInfoTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationEditorInfo Info = UEditorAutomationCoreLibrary::GetEditorInfo();
+	FEditorAutomationEditorInfo Info;
+	const FEditorAutomationResult Result = UEditorAutomationCoreLibrary::GetEditorInfo(Info);
+	TestTrue(TEXT("GetEditorInfo succeeds"), Result.bSuccess);
 	TestTrue(TEXT("ProcessId is the current process"), Info.ProcessId == static_cast<int64>(FPlatformProcess::GetCurrentProcessId()));
 	TestFalse(TEXT("EngineVersion is reported"), Info.EngineVersion.IsEmpty());
 	TestEqual(TEXT("ProjectName is reported"), Info.ProjectName, FString(FApp::GetProjectName()));
@@ -96,10 +98,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetEnumInfoTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationEnumInfo Info =
-		UEditorAutomationCoreLibrary::GetEnumInfo(TEXT("enum(/Script/Engine.ECollisionEnabled)"));
+	FEditorAutomationEnumInfo Info;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetEnumInfo(TEXT("enum(/Script/Engine.ECollisionEnabled)"), Info);
 
-	TestTrue(TEXT("The enum resolved"), Info.Enum != nullptr);
+	TestTrue(TEXT("The enum resolved"), Result.bSuccess);
+	TestTrue(TEXT("The enum object is reported"), Info.Enum != nullptr);
 	const FEditorAutomationEnumEntry* QueryAndPhysics = FindByName(Info.Entries, TEXT("QueryAndPhysics"));
 	TestNotNull(TEXT("QueryAndPhysics entry exists"), QueryAndPhysics);
 	if (QueryAndPhysics != nullptr)
@@ -107,9 +111,14 @@ bool FEditorAutomationGetEnumInfoTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("The entry has a display name"), QueryAndPhysics->DisplayName.IsEmpty());
 	}
 
-	AddExpectedError(TEXT("Type 'not-a-type' is not valid"), EAutomationExpectedErrorFlags::Contains, 1);
-	const FEditorAutomationEnumInfo Invalid = UEditorAutomationCoreLibrary::GetEnumInfo(TEXT("not-a-type"));
-	TestTrue(TEXT("An invalid Type returns an empty result"), Invalid.Enum == nullptr && Invalid.Entries.IsEmpty());
+	FEditorAutomationEnumInfo InvalidInfo;
+	const FEditorAutomationResult Invalid =
+		UEditorAutomationCoreLibrary::GetEnumInfo(TEXT("not-a-type"), InvalidInfo);
+	TestFalse(TEXT("An invalid Type fails"), Invalid.bSuccess);
+	TestTrue(TEXT("The failure names the argument problem"), Invalid.ErrorCode == EEditorAutomationResultCode::InvalidArgument);
+	TestFalse(TEXT("The failure explains itself"), Invalid.ErrorMessage.IsEmpty());
+	TestFalse(TEXT("The failure suggests a fix"), Invalid.Hint.IsEmpty());
+	TestTrue(TEXT("A failed call leaves the payload empty"), InvalidInfo.Enum == nullptr && InvalidInfo.Entries.IsEmpty());
 	return true;
 }
 
@@ -120,8 +129,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetStructInfoTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationStructInfo Info = UEditorAutomationCoreLibrary::GetStructInfo(TEXT("struct(/Script/CoreUObject.Vector)"));
-	TestTrue(TEXT("The struct resolved"), Info.Struct != nullptr);
+	FEditorAutomationStructInfo Info;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetStructInfo(TEXT("struct(/Script/CoreUObject.Vector)"), Info);
+	TestTrue(TEXT("The struct resolved"), Result.bSuccess);
 	TestTrue(TEXT("The struct has members"), Info.Properties.Num() >= 3);
 	TestNotNull(TEXT("X is a member"), FindByName(Info.Properties, TEXT("X")));
 	TestNotNull(TEXT("Y is a member"), FindByName(Info.Properties, TEXT("Y")));
@@ -136,15 +147,20 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetClassInfoTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationClassInfo Info = UEditorAutomationCoreLibrary::GetClassInfo(StaticMeshComponentType);
-	TestTrue(TEXT("The class resolved"), Info.Class != nullptr);
+	FEditorAutomationClassInfo Info;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetClassInfo(StaticMeshComponentType, Info);
+	TestTrue(TEXT("The class resolved"), Result.bSuccess);
 	TestTrue(TEXT("The class reports properties"), Info.Properties.Num() > 0);
 	TestTrue(TEXT("The class reports BlueprintCallable functions"), Info.Functions.Num() > 0);
 	TestNotNull(TEXT("GetClosestPointOnCollision is listed"), FindByName(Info.Functions, TEXT("GetClosestPointOnCollision")));
 
-	AddExpectedError(TEXT("Type '/Script/Engine.NotAClass' is not valid"), EAutomationExpectedErrorFlags::Contains, 1);
-	const FEditorAutomationClassInfo Invalid = UEditorAutomationCoreLibrary::GetClassInfo(TEXT("/Script/Engine.NotAClass"));
-	TestTrue(TEXT("An invalid Type returns an empty result"), Invalid.Class == nullptr && Invalid.Functions.IsEmpty());
+	FEditorAutomationClassInfo InvalidInfo;
+	const FEditorAutomationResult Invalid =
+		UEditorAutomationCoreLibrary::GetClassInfo(TEXT("/Script/Engine.NotAClass"), InvalidInfo);
+	TestFalse(TEXT("An invalid Type fails"), Invalid.bSuccess);
+	TestFalse(TEXT("The failure explains itself"), Invalid.ErrorMessage.IsEmpty());
+	TestTrue(TEXT("A failed call leaves the payload empty"), InvalidInfo.Class == nullptr && InvalidInfo.Functions.IsEmpty());
 	return true;
 }
 
@@ -155,16 +171,20 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetFunctionInfoTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationFunctionInfo Info =
-		UEditorAutomationCoreLibrary::GetFunctionInfo(StaticMeshComponentType, TEXT("GetClosestPointOnCollision"));
+	FEditorAutomationFunctionInfo Info;
+	const FEditorAutomationResult Result = UEditorAutomationCoreLibrary::GetFunctionInfo(
+		StaticMeshComponentType, TEXT("GetClosestPointOnCollision"), Info);
+	TestTrue(TEXT("The function resolved"), Result.bSuccess);
 	TestEqual(TEXT("The function name matches"), Info.Name, FString(TEXT("GetClosestPointOnCollision")));
 	TestTrue(TEXT("The function is BlueprintCallable"), Info.bBlueprintCallable);
 	TestEqual(TEXT("The function has three parameters"), Info.Parameters.Num(), 3);
 
-	AddExpectedError(TEXT("Function 'NotARealFunction' was not found"), EAutomationExpectedErrorFlags::Contains, 1);
-	const FEditorAutomationFunctionInfo Missing =
-		UEditorAutomationCoreLibrary::GetFunctionInfo(StaticMeshComponentType, TEXT("NotARealFunction"));
-	TestTrue(TEXT("A missing function returns an empty result"), Missing.Name.IsEmpty());
+	FEditorAutomationFunctionInfo MissingInfo;
+	const FEditorAutomationResult Missing = UEditorAutomationCoreLibrary::GetFunctionInfo(
+		StaticMeshComponentType, TEXT("NotARealFunction"), MissingInfo);
+	TestFalse(TEXT("A missing function fails"), Missing.bSuccess);
+	TestTrue(TEXT("The missing function is reported as not found"), Missing.ErrorCode == EEditorAutomationResultCode::NotFound);
+	TestTrue(TEXT("A failed call leaves the payload empty"), MissingInfo.Name.IsEmpty());
 	return true;
 }
 
@@ -175,10 +195,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetObjectClassTest::RunTest(const FString& Parameters)
 {
-	const FString ClassType = UEditorAutomationCoreLibrary::GetObjectClass(StaticMeshComponentCdoPath);
+	FString ClassType;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetObjectClass(StaticMeshComponentCdoPath, ClassType);
+	TestTrue(TEXT("GetObjectClass succeeds"), Result.bSuccess);
 	TestEqual(TEXT("The CDO's class Type is canonical"), ClassType, FString(StaticMeshComponentType));
-	AddExpectedError(TEXT("object '/Script/Engine.Nope' could not be loaded"), EAutomationExpectedErrorFlags::Contains, 1);
-	TestTrue(TEXT("An invalid object path returns an empty Type"), UEditorAutomationCoreLibrary::GetObjectClass(TEXT("/Script/Engine.Nope")).IsEmpty());
+
+	FString MissingClassType;
+	const FEditorAutomationResult Missing =
+		UEditorAutomationCoreLibrary::GetObjectClass(TEXT("/Script/Engine.Nope"), MissingClassType);
+	TestFalse(TEXT("An invalid object path fails"), Missing.bSuccess);
+	TestTrue(TEXT("The failure explains itself"), !Missing.ErrorMessage.IsEmpty());
+	TestTrue(TEXT("A failed call leaves the payload empty"), MissingClassType.IsEmpty());
 	return true;
 }
 
@@ -189,14 +217,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetPropertyTypeTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationPropertyTypeInfo PropertyType =
-		UEditorAutomationCoreLibrary::GetPropertyType(StaticMeshComponentType, TEXT("RelativeLocation.X"));
+	FEditorAutomationPropertyTypeInfo PropertyType;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetPropertyType(StaticMeshComponentType, TEXT("RelativeLocation.X"), PropertyType);
+	TestTrue(TEXT("GetPropertyType succeeds"), Result.bSuccess);
 	TestEqual(TEXT("RelativeLocation.X is a double"), PropertyType.Type, FString(TEXT("double")));
 	TestFalse(TEXT("The resolved property carries its display name"), PropertyType.DisplayNameText.NativeText.IsEmpty());
-	AddExpectedError(TEXT("Property 'NoSuchProperty' was not found"), EAutomationExpectedErrorFlags::Contains, 1);
-	TestTrue(
-		TEXT("An unknown property returns an empty Type"),
-		UEditorAutomationCoreLibrary::GetPropertyType(StaticMeshComponentType, TEXT("NoSuchProperty")).Type.IsEmpty());
+
+	FEditorAutomationPropertyTypeInfo MissingType;
+	const FEditorAutomationResult Missing =
+		UEditorAutomationCoreLibrary::GetPropertyType(StaticMeshComponentType, TEXT("NoSuchProperty"), MissingType);
+	TestFalse(TEXT("An unknown property fails"), Missing.bSuccess);
+	TestTrue(TEXT("The failure explains itself"), !Missing.ErrorMessage.IsEmpty());
+	TestTrue(TEXT("A failed call leaves the payload empty"), MissingType.Type.IsEmpty());
 	return true;
 }
 
@@ -207,12 +240,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetPropertyValueTest::RunTest(const FString& Parameters)
 {
-	const FString ValueJson = UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("RelativeLocation"));
+	FString ValueJson;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("RelativeLocation"), ValueJson);
+	TestTrue(TEXT("GetPropertyValue succeeds"), Result.bSuccess);
 	TestFalse(TEXT("RelativeLocation serializes to nested JSON text"), ValueJson.IsEmpty());
 	TestTrue(TEXT("The JSON text is an object"), ValueJson.StartsWith(TEXT("{")));
-	AddExpectedError(TEXT("Property 'NoSuchProperty' was not found"), EAutomationExpectedErrorFlags::Contains, 1);
-	TestTrue(TEXT("An invalid property returns empty text"),
-		UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("NoSuchProperty")).IsEmpty());
+
+	FString MissingValue;
+	const FEditorAutomationResult Missing =
+		UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("NoSuchProperty"), MissingValue);
+	TestFalse(TEXT("An invalid property fails"), Missing.bSuccess);
+	TestTrue(TEXT("A failed call leaves the payload empty"), MissingValue.IsEmpty());
 	return true;
 }
 
@@ -223,26 +262,34 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationSetPropertyValueTest::RunTest(const FString& Parameters)
 {
-	const FString Before = UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"));
+	FString Before;
+	TestTrue(
+		TEXT("The property reads before the write"),
+		UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"), Before).bSuccess);
 
-	const FEditorAutomationPropertyWrite Write = UEditorAutomationCoreLibrary::SetPropertyValue(
-		StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"), TEXT("true"), false);
-	TestTrue(TEXT("The write succeeded"), Write.bSuccess);
+	FEditorAutomationPropertyWrite Write;
+	const FEditorAutomationResult WriteResult = UEditorAutomationCoreLibrary::SetPropertyValue(
+		StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"), TEXT("true"), false, Write);
+	TestTrue(TEXT("The write succeeded"), WriteResult.bSuccess);
 	TestEqual(TEXT("The write reports the old value"), Write.OldValueJson, Before);
 	TestEqual(TEXT("The write reports the new value"), Write.NewValueJson, FString(TEXT("\"true\"")));
 
-	const FEditorAutomationPropertyWrite Restore = UEditorAutomationCoreLibrary::SetPropertyValue(
-		StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"), Before, false);
-	TestTrue(TEXT("The restore succeeded"), Restore.bSuccess);
-	TestEqual(
-		TEXT("The restored value matches the original"),
-		UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow")),
-		Before);
+	FEditorAutomationPropertyWrite Restore;
+	const FEditorAutomationResult RestoreResult = UEditorAutomationCoreLibrary::SetPropertyValue(
+		StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"), Before, false, Restore);
+	TestTrue(TEXT("The restore succeeded"), RestoreResult.bSuccess);
 
-	AddExpectedError(TEXT("could not be written: JSON text could not be parsed"), EAutomationExpectedErrorFlags::Contains, 1);
-	const FEditorAutomationPropertyWrite BadValue = UEditorAutomationCoreLibrary::SetPropertyValue(
-		StaticMeshComponentCdoPath, TEXT("RelativeLocation.X"), TEXT("not-json"), false);
-	TestFalse(TEXT("An invalid value fails the write"), BadValue.bSuccess);
+	FString Restored;
+	TestTrue(
+		TEXT("The property reads back after the restore"),
+		UEditorAutomationCoreLibrary::GetPropertyValue(StaticMeshComponentCdoPath, TEXT("bCastDynamicShadow"), Restored).bSuccess);
+	TestEqual(TEXT("The restored value matches the original"), Restored, Before);
+
+	FEditorAutomationPropertyWrite BadWrite;
+	const FEditorAutomationResult BadResult = UEditorAutomationCoreLibrary::SetPropertyValue(
+		StaticMeshComponentCdoPath, TEXT("RelativeLocation.X"), TEXT("not-json"), false, BadWrite);
+	TestFalse(TEXT("An invalid value fails the write"), BadResult.bSuccess);
+	TestTrue(TEXT("The failure explains itself"), !BadResult.ErrorMessage.IsEmpty());
 	return true;
 }
 
@@ -256,8 +303,9 @@ bool FEditorAutomationCallFunctionTest::RunTest(const FString& Parameters)
 	const FEditorAutomationCallFunctionResult Result =
 		UEditorAutomationCoreLibrary::CallFunction(LibraryCdoPath, TEXT("Ping"), TEXT("{}"), false);
 	TestEqual(TEXT("CallFunction reaches Ping"), Result.ErrorCode, 0);
-	TestEqual(TEXT("The return value is the nested-JSON text of pong"), Result.ReturnValueJson, FString(TEXT("\"pong\"")));
-	TestEqual(TEXT("The return Type is reported"), Result.ReturnType, FString(TEXT("string")));
+	TestTrue(TEXT("The return value is the envelope"), Result.ReturnValueJson.Contains(TEXT("\"bSuccess\":\"true\"")));
+	TestTrue(TEXT("The out parameter carries data"), Result.OutParametersJson.Contains(TEXT("\"OutValue\":\"pong\"")));
+	TestTrue(TEXT("The return Type is the envelope struct"), Result.ReturnType.Contains(TEXT("EditorAutomationResult")));
 
 	const FEditorAutomationCallFunctionResult Missing =
 		UEditorAutomationCoreLibrary::CallFunction(LibraryCdoPath, TEXT("NotARealFunction"), TEXT("{}"), false);
@@ -282,8 +330,10 @@ bool FEditorAutomationCallFunctionsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Both calls are reported"), Result.Results.Num(), 2);
 	if (Result.Results.Num() == 2)
 	{
-		TestEqual(TEXT("The first call returns pong"), Result.Results[0].ReturnValueJson, FString(TEXT("\"pong\"")));
-		TestFalse(TEXT("The second call returns editor info"), Result.Results[1].ReturnValueJson.IsEmpty());
+		TestTrue(TEXT("The first call returns an envelope"), Result.Results[0].ReturnValueJson.Contains(TEXT("\"bSuccess\":\"true\"")));
+		TestTrue(TEXT("The first call reports its out value"), Result.Results[0].OutParametersJson.Contains(TEXT("\"OutValue\":\"pong\"")));
+		TestTrue(TEXT("The second call returns an envelope"), Result.Results[1].ReturnValueJson.Contains(TEXT("\"bSuccess\":\"true\"")));
+		TestTrue(TEXT("The second call reports editor info"), Result.Results[1].OutParametersJson.Contains(TEXT("ProcessId")));
 	}
 
 	const FEditorAutomationBatchCallResult Invalid = UEditorAutomationCoreLibrary::CallFunctions(TEXT("not-json"));
@@ -299,12 +349,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FEditorAutomationGetRecentLogTest::RunTest(const FString& Parameters)
 {
-	const FEditorAutomationLogPage Page = UEditorAutomationCoreLibrary::GetRecentLog(10, 3, TEXT(""), false);
+	FEditorAutomationLogPage Page;
+	const FEditorAutomationResult Result =
+		UEditorAutomationCoreLibrary::GetRecentLog(10, 3, TEXT(""), false, Page);
+	TestTrue(TEXT("GetRecentLog succeeds"), Result.bSuccess);
 	TestTrue(TEXT("The capture reports a total"), Page.TotalRecorded >= 0);
 	TestTrue(TEXT("The page respects MaxLines"), Page.Entries.Num() <= 10);
-
-	// The capture device itself is verified against a live editor (RC); automation only checks the page shape.
-
 	return true;
 }
 

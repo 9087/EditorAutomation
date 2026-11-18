@@ -162,10 +162,15 @@ namespace
 	}
 }
 
-TArray<FString> UEditorAutomationUMGLibrary::GetWidgetRoots()
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetWidgetRoots(TArray<FString>& OutRoots)
 {
-	TArray<FString> Roots;
-	if (!IsInGameThread()) return Roots;
+	if (!IsInGameThread())
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("GetWidgetRoots must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
+	}
 	for (TObjectIterator<UUserWidget> It; It; ++It)
 	{
 		UUserWidget* Widget = *It;
@@ -173,46 +178,78 @@ TArray<FString> UEditorAutomationUMGLibrary::GetWidgetRoots()
 		if (Widget->GetWorld()->WorldType != EWorldType::PIE) continue;
 		if (!Widget->GetCachedWidget().IsValid()) continue;
 		if (!Widget->IsInViewport()) continue;
-		Roots.AddUnique(Widget->GetPathName());
+		OutRoots.AddUnique(Widget->GetPathName());
 	}
-	Roots.Sort();
-	return Roots;
+	OutRoots.Sort();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationUMGLibrary::GetWidgetBlueprintPath(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetWidgetBlueprintPath(UWidget* Widget, FString& OutBlueprintPath)
 {
-	if (Widget == nullptr) return FString();
+	if (Widget == nullptr)
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
+	}
 	UUserWidget* UserWidget = Cast<UUserWidget>(Widget);
 	if (UserWidget == nullptr)
 	{
 		UserWidget = Widget->GetTypedOuter<UUserWidget>();
 	}
-	return BlueprintPathOf(UserWidget);
-}
-
-FString UEditorAutomationUMGLibrary::GetWidgetClassPath(UWidget* Widget)
-{
-	return Widget != nullptr && Widget->GetClass() != nullptr ? Widget->GetClass()->GetPathName() : FString();
-}
-
-FEditorAutomationWidgetTreeDiff UEditorAutomationUMGLibrary::GetWidgetTreeDiff(UUserWidget* RootWidget)
-{
-	FEditorAutomationWidgetTreeDiff Diff;
-	if (!IsInGameThread() || RootWidget == nullptr)
+	OutBlueprintPath = BlueprintPathOf(UserWidget);
+	if (OutBlueprintPath.IsEmpty())
 	{
-		if (RootWidget == nullptr)
-		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("GetWidgetTreeDiff: root widget is null."));
-		}
-		return Diff;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Widget '%s' belongs to no UserWidget Blueprint."), *Widget->GetPathName()),
+			TEXT("Pass a widget that is part of a WidgetBlueprint tree."));
 	}
+	return FEditorAutomationResult::Success();
+}
+
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetWidgetClassPath(UWidget* Widget, FString& OutClassPath)
+{
+	if (Widget == nullptr || Widget->GetClass() == nullptr)
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
+	}
+	OutClassPath = Widget->GetClass()->GetPathName();
+	return FEditorAutomationResult::Success();
+}
+
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetWidgetTreeDiff(
+	UUserWidget* RootWidget,
+	FEditorAutomationWidgetTreeDiff& OutDiff)
+{
+	if (!IsInGameThread())
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("GetWidgetTreeDiff must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
+	}
+	if (RootWidget == nullptr)
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("RootWidget is null."),
+			TEXT("Pass a UUserWidget object path from GetWidgetRoots."));
+	}
+
+	FEditorAutomationWidgetTreeDiff Diff;
 	Diff.RootObjectPath = RootWidget->GetPathName();
 	UWidget* Start = RootWidget->WidgetTree != nullptr ? RootWidget->WidgetTree->RootWidget : nullptr;
 	if (Start == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("GetWidgetTreeDiff: root widget '%s' has no WidgetTree root."), *RootWidget->GetPathName());
-		return Diff;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Root widget '%s' has no WidgetTree root."), *RootWidget->GetPathName()),
+			TEXT("Verify the widget is fully constructed before reading its tree."));
 	}
 	Diff.RootObjectPath = Start->GetPathName();
 
@@ -272,7 +309,6 @@ FEditorAutomationWidgetTreeDiff UEditorAutomationUMGLibrary::GetWidgetTreeDiff(U
 				Node.Properties.Add(MoveTemp(Info));
 				bChanged = true;
 			}
-			// A property that disappeared is a change too (e.g. a cleared binding text).
 			for (const TPair<FString, FWidgetPropertySnapshot>& Old : *OldProperties)
 			{
 				if (Properties.Contains(Old.Key)) continue;
@@ -292,7 +328,6 @@ FEditorAutomationWidgetTreeDiff UEditorAutomationUMGLibrary::GetWidgetTreeDiff(U
 		}
 	}
 
-	// Deleted widgets: report the previous snapshot's paths that are gone now.
 	for (const TPair<FString, TMap<FString, FWidgetPropertySnapshot>>& Old : Previous.Properties)
 	{
 		if (Seen.Contains(Old.Key)) continue;
@@ -305,81 +340,102 @@ FEditorAutomationWidgetTreeDiff UEditorAutomationUMGLibrary::GetWidgetTreeDiff(U
 	}
 	Diff.Nodes.Append(DeleteNodes);
 	GWidgetTreeCache.Add(RootWidget->GetPathName(), MoveTemp(Current));
-	return Diff;
+	OutDiff = MoveTemp(Diff);
+	return FEditorAutomationResult::Success();
 }
 
-void UEditorAutomationUMGLibrary::ResetWidgetTreeCache(UUserWidget* RootWidget)
+FEditorAutomationResult UEditorAutomationUMGLibrary::ResetWidgetTreeCache(UUserWidget* RootWidget)
 {
-	if (RootWidget != nullptr) GWidgetTreeCache.Remove(RootWidget->GetPathName());
+	if (RootWidget == nullptr)
+	{
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("RootWidget is null."),
+			TEXT("Pass a UUserWidget object path from GetWidgetRoots."));
+	}
+	GWidgetTreeCache.Remove(RootWidget->GetPathName());
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationWidgetGeometry UEditorAutomationUMGLibrary::GetWidgetGeometry(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetWidgetGeometry(
+	UWidget* Widget,
+	FEditorAutomationWidgetGeometry& OutGeometry)
 {
-	FEditorAutomationWidgetGeometry Geometry;
 	if (Widget == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("GetWidgetGeometry: widget is null."));
-		return Geometry;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
 	}
 	const TSharedPtr<SWidget> SlateWidget = Widget->GetCachedWidget();
 	if (!SlateWidget.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("GetWidgetGeometry: widget '%s' has no Slate widget yet."), *Widget->GetPathName());
-		return Geometry;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Widget '%s' has no Slate widget yet."), *Widget->GetPathName()),
+			TEXT("Wait for the widget to be constructed/visible, then retry."));
 	}
 	const FGeometry& CachedGeometry = SlateWidget->GetCachedGeometry();
 	if (CachedGeometry.GetAbsoluteSize().IsNearlyZero())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("GetWidgetGeometry: widget '%s' is not laid out yet."), *Widget->GetPathName());
-		return Geometry;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Widget '%s' is not laid out yet (zero size)."), *Widget->GetPathName()),
+			TEXT("Wait for the next frame/paint pass, then retry."));
 	}
-	Geometry.AbsolutePosition = CachedGeometry.GetAbsolutePosition();
-	Geometry.AbsoluteSize = CachedGeometry.GetAbsoluteSize();
-	Geometry.LocalSize = CachedGeometry.GetLocalSize();
-	Geometry.LayoutScale = CachedGeometry.GetAccumulatedLayoutTransform().GetScale();
-	return Geometry;
+	OutGeometry.AbsolutePosition = CachedGeometry.GetAbsolutePosition();
+	OutGeometry.AbsoluteSize = CachedGeometry.GetAbsoluteSize();
+	OutGeometry.LocalSize = CachedGeometry.GetLocalSize();
+	OutGeometry.LayoutScale = CachedGeometry.GetAccumulatedLayoutTransform().GetScale();
+	return FEditorAutomationResult::Success();
 }
 
 namespace
 {
-	/** Resolve a widget that must be a UMG UListView; logs when it is not. */
-	UListView* AsListView(UWidget* Widget, const TCHAR* FunctionName)
+	/** Resolve a widget that must be a UMG UListView; the failure is returned in the envelope. */
+	FEditorAutomationResult RequireListView(UWidget* Widget, const TCHAR* FunctionName, UListView*& OutListView)
 	{
 		if (Widget == nullptr)
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("%s: Widget must not be null."), FunctionName);
-			return nullptr;
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::InvalidArgument,
+				TEXT("Widget is null."),
+				TEXT("Pass a UListView widget object path."));
 		}
-		UListView* ListView = Cast<UListView>(Widget);
-		if (ListView == nullptr)
+		OutListView = Cast<UListView>(Widget);
+		if (OutListView == nullptr)
 		{
-			UE_LOG(LogEditorAutomation, Error,
-				TEXT("%s: widget '%s' is not a UListView; list introspection requires UMG's UListView."),
-				FunctionName, *Widget->GetPathName());
-			return nullptr;
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::WrongType,
+				FString::Printf(TEXT("%s: widget '%s' is not a UListView."), FunctionName, *Widget->GetPathName()),
+				TEXT("List introspection requires UMG's UListView."));
 		}
-		return ListView;
+		return FEditorAutomationResult::Success();
 	}
 }
 
-FEditorAutomationListViewInfo UEditorAutomationUMGLibrary::GetListViewInfo(UWidget* Widget, int32 MaxItems)
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetListViewInfo(
+	UWidget* Widget,
+	const int32 MaxItems,
+	FEditorAutomationListViewInfo& OutInfo)
 {
-	FEditorAutomationListViewInfo Result;
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("GetListViewInfo must be called on the game thread."));
-		Result.bSuccess = false;
-		return Result;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("GetListViewInfo must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
-	UListView* ListView = AsListView(Widget, TEXT("GetListViewInfo"));
-	if (ListView == nullptr)
+	UListView* ListView = nullptr;
+	const FEditorAutomationResult Required = RequireListView(Widget, TEXT("GetListViewInfo"), ListView);
+	if (!Required.bSuccess)
 	{
-		Result.bSuccess = false;
-		return Result;
+		return Required;
 	}
 
-	Result.ItemCount = ListView->GetNumItems();
-	const int32 Limit = (MaxItems > 0) ? FMath::Min(MaxItems, Result.ItemCount) : Result.ItemCount;
+	OutInfo.ItemCount = ListView->GetNumItems();
+	const int32 Limit = (MaxItems > 0) ? FMath::Min(MaxItems, OutInfo.ItemCount) : OutInfo.ItemCount;
 	for (int32 Index = 0; Index < Limit; ++Index)
 	{
 		UObject* Item = ListView->GetItemAt(Index);
@@ -387,134 +443,143 @@ FEditorAutomationListViewInfo UEditorAutomationUMGLibrary::GetListViewInfo(UWidg
 		ItemInfo.Index = Index;
 		ItemInfo.Item = Item;
 		ItemInfo.ItemClass = (Item != nullptr) ? Item->GetClass() : nullptr;
-		Result.Items.Add(MoveTemp(ItemInfo));
+		OutInfo.Items.Add(MoveTemp(ItemInfo));
 	}
-	return Result;
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationListEntryInfo UEditorAutomationUMGLibrary::GetListEntryInfo(UWidget* Widget, int32 Index)
+FEditorAutomationResult UEditorAutomationUMGLibrary::GetListEntryInfo(
+	UWidget* Widget,
+	const int32 Index,
+	FEditorAutomationListEntryInfo& OutEntry)
 {
-	FEditorAutomationListEntryInfo Result;
-	Result.Index = Index;
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("GetListEntryInfo must be called on the game thread."));
-		Result.bSuccess = false;
-		return Result;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("GetListEntryInfo must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
-	UListView* ListView = AsListView(Widget, TEXT("GetListEntryInfo"));
-	if (ListView == nullptr)
+	UListView* ListView = nullptr;
+	const FEditorAutomationResult Required = RequireListView(Widget, TEXT("GetListEntryInfo"), ListView);
+	if (!Required.bSuccess)
 	{
-		Result.bSuccess = false;
-		return Result;
+		return Required;
 	}
 	const int32 ItemCount = ListView->GetNumItems();
 	if (Index < 0 || Index >= ItemCount)
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("GetListEntryInfo: index %d is out of range (item count %d)."), Index, ItemCount);
-		Result.bSuccess = false;
-		return Result;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Index %d is out of range (item count %d)."), Index, ItemCount),
+			TEXT("Pass a valid item index; call GetListViewInfo to read the item count."));
 	}
 	UObject* Item = ListView->GetItemAt(Index);
 	UUserWidget* EntryWidget = (Item != nullptr) ? ListView->GetEntryWidgetFromItem(Item) : nullptr;
 	if (EntryWidget == nullptr)
 	{
-		// Read-only: a virtualized item simply has no row widget yet; ScrollToListEntry
-		// brings it on screen as an explicit action.
-		UE_LOG(LogEditorAutomation, Warning,
-			TEXT("GetListEntryInfo: item %d has no row widget (virtualized out of view)."), Index);
-		Result.bSuccess = false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Item %d has no row widget (it is virtualized out of view)."), Index),
+			TEXT("Call ScrollToListEntry first to bring the item on screen."));
+	}
+	OutEntry.Index = Index;
+	OutEntry.EntryWidget = EntryWidget;
+	OutEntry.EntryWidgetClass = EntryWidget->GetClass();
+	return FEditorAutomationResult::Success();
+}
+
+FEditorAutomationResult UEditorAutomationUMGLibrary::ScrollToListEntry(
+	UWidget* Widget,
+	const int32 Index,
+	FEditorAutomationListEntryInfo& OutEntry)
+{
+	FEditorAutomationResult Result = GetListEntryInfo(Widget, Index, OutEntry);
+	if (Result.bSuccess)
+	{
 		return Result;
 	}
-	Result.EntryWidget = EntryWidget;
-	Result.EntryWidgetClass = EntryWidget->GetClass();
+	if (Result.ErrorCode != EEditorAutomationResultCode::NotReady)
+	{
+		return Result;
+	}
+
+	if (UListView* ListView = Cast<UListView>(Widget))
+	{
+		if (Index >= 0 && Index < ListView->GetNumItems())
+		{
+			if (TSharedPtr<STableViewBase> TableView = StaticCastSharedPtr<STableViewBase>(ListView->GetCachedWidget()))
+			{
+				TableView->SetScrollOffset(Index);
+				// A step of at least 1/12s makes FInterpTo (speed 12.0) reach the target within
+				// this one tick, whether or not scrolling animates.
+				TableView->Tick(TableView->GetTickSpaceGeometry(), FSlateApplication::Get().GetCurrentTime(), 1.0f);
+			}
+			return GetListEntryInfo(Widget, Index, OutEntry);
+		}
+	}
 	return Result;
 }
 
-FEditorAutomationListEntryInfo UEditorAutomationUMGLibrary::ScrollToListEntry(UWidget* Widget, int32 Index)
+FEditorAutomationResult UEditorAutomationUMGLibrary::ScrollToListEntryAndSendClick(
+	UWidget* Widget,
+	const int32 Index,
+	const FEditorAutomationSendClickOptions& Options)
 {
-	FEditorAutomationListEntryInfo Entry = GetListEntryInfo(Widget, Index);
-	if (!Entry.bSuccess)
-	{
-		if (UListView* ListView = Cast<UListView>(Widget))
-		{
-			if (Index >= 0 && Index < ListView->GetNumItems())
-			{
-				if (TSharedPtr<STableViewBase> TableView = StaticCastSharedPtr<STableViewBase>(ListView->GetCachedWidget()))
-				{
-					TableView->SetScrollOffset(Index);
-					// A step of at least 1/12s makes FInterpTo (speed 12.0) reach the
-					// target within this one tick, whether or not scrolling animates.
-					TableView->Tick(TableView->GetTickSpaceGeometry(), FSlateApplication::Get().GetCurrentTime(), 1.0f);
-				}
-				Entry = GetListEntryInfo(Widget, Index);
-			}
-		}
-	}
-	if (!Entry.bSuccess)
-	{
-		UE_LOG(LogEditorAutomation, Warning,
-			TEXT("ScrollToListEntry: row for item %d is still not available."), Index);
-	}
-	return Entry;
-}
-
-bool UEditorAutomationUMGLibrary::ScrollToListEntryAndSendClick(
-	UWidget* Widget, int32 Index, const FEditorAutomationSendClickOptions& Options)
-{
-	// Probe first: a row already on screen was drawn by an earlier frame, so its
-	// geometry and hit-test entry are in place and the click reaches it.
-	FEditorAutomationListEntryInfo Entry = GetListEntryInfo(Widget, Index);
-	if (Entry.bSuccess && Entry.EntryWidget != nullptr)
+	// Probe first: a row already on screen was drawn by an earlier frame, so its geometry and
+	// hit-test entry are in place and the click reaches it.
+	FEditorAutomationListEntryInfo Entry;
+	FEditorAutomationResult Result = GetListEntryInfo(Widget, Index, Entry);
+	if (Result.bSuccess && Entry.EntryWidget != nullptr)
 	{
 		return UEditorAutomationInputLibrary::SendClick(Entry.EntryWidget, Options);
 	}
-
-	UListView* ListView = AsListView(Widget, TEXT("ScrollToListEntryAndSendClick"));
-	if (ListView == nullptr)
+	if (!Result.bSuccess && Result.ErrorCode != EEditorAutomationResultCode::NotReady)
 	{
-		return false;
-	}
-	if (Index < 0 || Index >= ListView->GetNumItems())
-	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("ScrollToListEntryAndSendClick: index %d is out of range (item count %d)."),
-			Index, ListView->GetNumItems());
-		return false;
+		return Result;
 	}
 
-	Entry = ScrollToListEntry(Widget, Index);
-	if (!Entry.bSuccess || Entry.EntryWidget == nullptr)
+	Result = ScrollToListEntry(Widget, Index, Entry);
+	if (!Result.bSuccess || Entry.EntryWidget == nullptr)
 	{
-		return false;
+		return Result;
 	}
 
-	// The row exists now, but this call created it and no frame has drawn it yet:
-	UE_LOG(LogEditorAutomation, Warning,
-		TEXT("ScrollToListEntryAndSendClick: row for item %d was created by this call and is not drawn yet; call again to click it."),
-		Index);
-	return false;
+	// The row exists now, but this call created it and no frame has drawn it yet, so the click
+	// cannot reach it. Report that; the next call clicks the now-drawn row.
+	return FEditorAutomationResult::Failure(
+		EEditorAutomationResultCode::NotReady,
+		FString::Printf(TEXT("Row for item %d was created by this call and is not drawn yet."), Index),
+		TEXT("Call again to click the now-drawn row."));
 }
 
-FString UEditorAutomationUMGLibrary::CaptureWidgetScreenshot(
-	UWidget* Widget, const FString& OutputPath, int32 Width, int32 Height)
+FEditorAutomationResult UEditorAutomationUMGLibrary::CaptureWidgetScreenshot(
+	UWidget* Widget,
+	const FString& OutputPath,
+	const int32 Width,
+	const int32 Height,
+	FString& OutFilePath)
 {
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureWidgetScreenshot must be called on the game thread."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("CaptureWidgetScreenshot must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	if (Widget == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureWidgetScreenshot: Widget must not be null."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path; use GetWidgetRoots to find one."));
 	}
 	if (!FApp::CanEverRender())
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("CaptureWidgetScreenshot: rendering is unavailable in this build (headless/server)."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("Rendering is unavailable in this build (headless/server)."),
+			TEXT("Screenshots require a rendering-capable editor."));
 	}
 
 	// Prefer the live Slate widget; build it when the UMG widget was never laid out.
@@ -525,9 +590,10 @@ FString UEditorAutomationUMGLibrary::CaptureWidgetScreenshot(
 	}
 	if (!SlateWidget.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error,
-			TEXT("CaptureWidgetScreenshot: widget '%s' has no Slate widget to render."), *Widget->GetPathName());
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Widget '%s' has no Slate widget to render."), *Widget->GetPathName()),
+			TEXT("Wait for the widget to be constructed/visible, then retry."));
 	}
 
 	FVector2D DrawSize;
@@ -550,8 +616,10 @@ FString UEditorAutomationUMGLibrary::CaptureWidgetScreenshot(
 	UTextureRenderTarget2D* RenderTarget = FWidgetRenderer::CreateTargetFor(DrawSize, TF_Bilinear, /*bUseGammaCorrection=*/true);
 	if (RenderTarget == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureWidgetScreenshot: the widget renderer failed to create a render target."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InternalError,
+			TEXT("The widget renderer failed to create a render target."),
+			TEXT("This is an EditorAutomation/engine bug; report the widget size and render settings."));
 	}
 	WidgetRenderer->DrawWidget(RenderTarget, SlateWidget.ToSharedRef(), DrawSize, 0.f, /*bDeferRenderTargetUpdate=*/false);
 
@@ -571,8 +639,10 @@ FString UEditorAutomationUMGLibrary::CaptureWidgetScreenshot(
 	FBufferArchive Buffer;
 	if (!FImageUtils::ExportRenderTarget2DAsPNG(RenderTarget, Buffer))
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureWidgetScreenshot: failed to encode the rendered widget as PNG."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InternalError,
+			TEXT("Failed to encode the rendered widget as PNG."),
+			TEXT("This is an EditorAutomation/engine bug; report the widget and render settings."));
 	}
 	if (FArchive* Writer = IFileManager::Get().CreateFileWriter(*FullPath))
 	{
@@ -581,8 +651,11 @@ FString UEditorAutomationUMGLibrary::CaptureWidgetScreenshot(
 	}
 	else
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureWidgetScreenshot: failed to create file '%s'."), *FullPath);
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::EditorRefused,
+			FString::Printf(TEXT("Failed to create file '%s'."), *FullPath),
+			TEXT("Check that the output directory exists and is writable."));
 	}
-	return FullPath;
+	OutFilePath = FullPath;
+	return FEditorAutomationResult::Success();
 }

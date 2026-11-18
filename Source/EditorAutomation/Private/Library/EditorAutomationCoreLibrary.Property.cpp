@@ -2,8 +2,6 @@
 
 #include "EditorAutomationCoreLibrary.h"
 
-#include "EditorAutomationLog.h"
-
 #include "Reflection/EditorAutomationPropertyPath.h"
 #include "Reflection/EditorAutomationText.h"
 #include "Reflection/EditorAutomationTypeTree.h"
@@ -17,172 +15,228 @@
 // Property
 // ============================================================================
 
-namespace
-{
-	/** Log one property failure and return an empty/invalid payload; readable through GetRecentLog. */
-	template <typename ResultT>
-	ResultT PropertyFailure(const FString& Message)
-	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("%s"), *Message);
-		return ResultT{};
-	}
-}
-
-
-FEditorAutomationPropertyTypeInfo UEditorAutomationCoreLibrary::GetPropertyType(const FString& Type, const FString& PropertyPath)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetPropertyType(
+	const FString& Type,
+	const FString& PropertyPath,
+	FEditorAutomationPropertyTypeInfo& OutInfo)
 {
 	if (Type.IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(TEXT("Type is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Type is empty."),
+			TEXT("Pass the class Type, e.g. class(/Script/Engine.StaticMeshComponent)."));
 	}
-
 	if (PropertyPath.IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(TEXT("PropertyPath is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("PropertyPath is empty."),
+			TEXT("Pass a property path, e.g. RelativeLocation.X."));
 	}
 
 	EditorAutomation::FTypeTree TypeTree;
 	FString ParseError;
 	if (!EditorAutomation::FTypeTree::TryParse(Type, TypeTree, ParseError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError),
+			TEXT("Pass Type in canonical form: class(/Script/Module.ClassName)."));
 	}
-
 	if (TypeTree.Kind != EditorAutomation::ETypeKind::Class && TypeTree.Kind != EditorAutomation::ETypeKind::Object)
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(FString::Printf(TEXT("Expected class(...) or object(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Expected class(...) or object(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)),
+			TEXT("GetPropertyType accepts class(...) and object(...) Types."));
 	}
 
 	UClass* Class = LoadObject<UClass>(nullptr, *TypeTree.Path);
 	if (Class == nullptr)
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(FString::Printf(TEXT("Class '%s' could not be loaded."), *TypeTree.Path));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Class '%s' could not be loaded."), *TypeTree.Path),
+			TEXT("Check the class path; it must name a loaded UClass object."));
 	}
 
 	TArray<EditorAutomation::FPropertyPath::FSegment> Segments;
 	if (!EditorAutomation::FPropertyPath::Parse(PropertyPath, Segments, ParseError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(ParseError);
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			ParseError,
+			TEXT("Pass a dotted property path, e.g. RelativeLocation.X or OverrideMaterials[0]."));
 	}
 
 	FProperty* Property = nullptr;
 	if (!EditorAutomation::FPropertyPath::ResolveType(Class, Segments, Property, ParseError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(ParseError);
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			ParseError,
+			TEXT("Call GetClassInfo on the same Type to inspect its property names."));
 	}
 
 	const FString PropertyType = EditorAutomation::FTypeTree::MakeStringFromProperty(Property);
 	if (PropertyType.IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyTypeInfo>(FString::Printf(TEXT("Property '%s' has a type that is not supported yet."), *PropertyPath));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Property '%s' has a type that is not supported yet."), *PropertyPath),
+			TEXT("The property exists but its Type has no canonical form; report the property if you need it."));
 	}
 
-	FEditorAutomationPropertyTypeInfo Info;
-	Info.Type = PropertyType;
-	Info.DisplayNameText = EditorAutomation::MakeTextRef(Property->GetDisplayNameText());
-	return Info;
+	OutInfo.Type = PropertyType;
+	OutInfo.DisplayNameText = EditorAutomation::MakeTextRef(Property->GetDisplayNameText());
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationCoreLibrary::GetPropertyValue(const FString& ObjectPath, const FString& PropertyPath)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetPropertyValue(
+	const FString& ObjectPath,
+	const FString& PropertyPath,
+	FString& OutValueJson)
 {
 	if (ObjectPath.IsEmpty())
 	{
-		return PropertyFailure<FString>(TEXT("ObjectPath is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("ObjectPath is empty."),
+			TEXT("Pass a full object path, e.g. /Script/Engine.Default__StaticMeshComponent."));
 	}
-
 	if (PropertyPath.IsEmpty())
 	{
-		return PropertyFailure<FString>(TEXT("PropertyPath is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("PropertyPath is empty."),
+			TEXT("Pass a property path, e.g. RelativeLocation.X."));
 	}
 
 	UObject* Object = LoadObject<UObject>(nullptr, *ObjectPath);
 	if (Object == nullptr)
 	{
-		return PropertyFailure<FString>(FString::Printf(TEXT("Object '%s' could not be loaded."), *ObjectPath));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Object '%s' could not be loaded."), *ObjectPath),
+			TEXT("Check the object path; it must name a loaded object."));
 	}
 
 	TArray<EditorAutomation::FPropertyPath::FSegment> Segments;
 	FString PathError;
 	if (!EditorAutomation::FPropertyPath::Parse(PropertyPath, Segments, PathError))
 	{
-		return PropertyFailure<FString>(PathError);
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			PathError,
+			TEXT("Pass a dotted property path, e.g. RelativeLocation.X or OverrideMaterials[0]."));
 	}
 
 	FProperty* Property = nullptr;
 	void* ValueAddress = nullptr;
 	if (!EditorAutomation::FPropertyPath::Resolve(Object, Segments, Property, ValueAddress, PathError))
 	{
-		return PropertyFailure<FString>(PathError);
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			PathError,
+			TEXT("Call GetClassInfo on the object's class to inspect its property names."));
 	}
 
 	if (EditorAutomation::FTypeTree::MakeStringFromProperty(Property).IsEmpty())
 	{
-		return PropertyFailure<FString>(FString::Printf(TEXT("Property '%s' has a type that is not supported yet."), *PropertyPath));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Property '%s' has a type that is not supported yet."), *PropertyPath),
+			TEXT("The property exists but its Type has no canonical form; report the property if you need it."));
 	}
 
-	FString ValueJson;
 	FString JsonError;
-	if (!EditorAutomation::FValueJson::ToJsonString(Property, ValueAddress, ValueJson, JsonError))
+	if (!EditorAutomation::FValueJson::ToJsonString(Property, ValueAddress, OutValueJson, JsonError))
 	{
-		return PropertyFailure<FString>(FString::Printf(TEXT("Property '%s' could not be serialized: %s"), *PropertyPath, *JsonError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::SerializationFailed,
+			FString::Printf(TEXT("Property '%s' could not be serialized: %s"), *PropertyPath, *JsonError),
+			TEXT("This is an EditorAutomation bug; report the property and its Type."));
 	}
 
-	return MoveTemp(ValueJson);
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationPropertyWrite UEditorAutomationCoreLibrary::SetPropertyValue(
+FEditorAutomationResult UEditorAutomationCoreLibrary::SetPropertyValue(
 	const FString& ObjectPath,
 	const FString& PropertyPath,
 	const FString& ValueJson,
-	const bool bGenerateTransaction)
+	const bool bGenerateTransaction,
+	FEditorAutomationPropertyWrite& OutWrite)
 {
 	if (ObjectPath.IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(TEXT("ObjectPath is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("ObjectPath is empty."),
+			TEXT("Pass a full object path, e.g. /Script/Engine.Default__StaticMeshComponent."));
 	}
-
 	if (PropertyPath.IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(TEXT("PropertyPath is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("PropertyPath is empty."),
+			TEXT("Pass a property path, e.g. RelativeLocation.X."));
 	}
-
 	if (ValueJson.IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(TEXT("ValueJson is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("ValueJson is empty."),
+			TEXT("Pass the new value as nested JSON text, e.g. \"12.5\" or {\"X\":\"0\",\"Y\":\"0\",\"Z\":\"1\"}."));
 	}
 
 	UObject* Object = LoadObject<UObject>(nullptr, *ObjectPath);
 	if (Object == nullptr)
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(TEXT("Object '%s' could not be loaded."), *ObjectPath));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Object '%s' could not be loaded."), *ObjectPath),
+			TEXT("Check the object path; it must name a loaded object."));
 	}
 
 	TArray<EditorAutomation::FPropertyPath::FSegment> Segments;
 	FString PathError;
 	if (!EditorAutomation::FPropertyPath::Parse(PropertyPath, Segments, PathError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(PathError);
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			PathError,
+			TEXT("Pass a dotted property path, e.g. RelativeLocation.X or OverrideMaterials[0]."));
 	}
 
 	FProperty* Property = nullptr;
 	void* ValueAddress = nullptr;
 	if (!EditorAutomation::FPropertyPath::Resolve(Object, Segments, Property, ValueAddress, PathError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(PathError);
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			PathError,
+			TEXT("Call GetClassInfo on the object's class to inspect its property names."));
 	}
 
 	if (EditorAutomation::FTypeTree::MakeStringFromProperty(Property).IsEmpty())
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(TEXT("Property '%s' has a type that is not supported yet."), *PropertyPath));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Property '%s' has a type that is not supported yet."), *PropertyPath),
+			TEXT("The property exists but its Type has no canonical form; report the property if you need it."));
 	}
 
-	FEditorAutomationPropertyWrite Result;
-	Result.DisplayNameText = EditorAutomation::MakeTextRef(Property->GetDisplayNameText());
+	OutWrite.DisplayNameText = EditorAutomation::MakeTextRef(Property->GetDisplayNameText());
 
 	FString JsonError;
-	if (!EditorAutomation::FValueJson::ToJsonString(Property, ValueAddress, Result.OldValueJson, JsonError))
+	if (!EditorAutomation::FValueJson::ToJsonString(Property, ValueAddress, OutWrite.OldValueJson, JsonError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(TEXT("Property '%s' could not be read before writing: %s"), *PropertyPath, *JsonError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::SerializationFailed,
+			FString::Printf(TEXT("Property '%s' could not be read before writing: %s"), *PropertyPath, *JsonError),
+			TEXT("This is an EditorAutomation bug; report the property and its Type."));
 	}
 
 	TUniquePtr<FScopedTransaction> Transaction;
@@ -206,26 +260,32 @@ FEditorAutomationPropertyWrite UEditorAutomationCoreLibrary::SetPropertyValue(
 			ValueAddress,
 			CurrentValueJson,
 			SnapshotError);
-		if (bCurrentValueRead && CurrentValueJson == Result.OldValueJson)
+		if (bCurrentValueRead && CurrentValueJson == OutWrite.OldValueJson)
 		{
 			// Nothing was changed (for example a single scalar was rejected before it was written, or the
-			// property type has no writable encoding such as a delegate). Report the original failure.
-			return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(TEXT("Property '%s' could not be written: %s"), *PropertyPath, *WriteError));
+			// property type has no writable encoding such as a delegate).
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::InvalidArgument,
+				FString::Printf(TEXT("Property '%s' could not be written: %s"), *PropertyPath, *WriteError),
+				TEXT("Check the property Type with GetPropertyType and encode the value accordingly."));
 		}
 
 		FString RollbackError;
 		const bool bRolledBack = EditorAutomation::FValueJson::FromJsonString(
-			Result.OldValueJson,
+			OutWrite.OldValueJson,
 			Property,
 			ValueAddress,
 			RollbackError);
 		if (!bRolledBack)
 		{
-			return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::InternalError,
+				FString::Printf(
 					TEXT("Property '%s' could not be written: %s. Rolling back to the previous value failed: %s"),
 					*PropertyPath,
 					*WriteError,
-					*RollbackError));
+					*RollbackError),
+				TEXT("The property may now be partially modified; report the property and its Type."));
 		}
 
 		// The value is back to what it was; notify listeners and mark the package dirty so derived editor
@@ -234,21 +294,26 @@ FEditorAutomationPropertyWrite UEditorAutomationCoreLibrary::SetPropertyValue(
 		Object->PostEditChangeProperty(RollbackEvent);
 		Object->MarkPackageDirty();
 
-		return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(
 				TEXT("Property '%s' could not be written: %s. The previous value was restored."),
 				*PropertyPath,
-				*WriteError));
+				*WriteError),
+			TEXT("Check the property Type with GetPropertyType and encode the value accordingly."));
 	}
 
 	FPropertyChangedEvent PropertyChangedEvent(Property);
 	Object->PostEditChangeProperty(PropertyChangedEvent);
 	Object->MarkPackageDirty();
 
-	if (!EditorAutomation::FValueJson::ToJsonString(Property, ValueAddress, Result.NewValueJson, JsonError))
+	if (!EditorAutomation::FValueJson::ToJsonString(Property, ValueAddress, OutWrite.NewValueJson, JsonError))
 	{
-		return PropertyFailure<FEditorAutomationPropertyWrite>(FString::Printf(TEXT("Property '%s' was written but could not be read back: %s"), *PropertyPath, *JsonError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::SerializationFailed,
+			FString::Printf(TEXT("Property '%s' was written but could not be read back: %s"), *PropertyPath, *JsonError),
+			TEXT("This is an EditorAutomation bug; report the property and its Type."));
 	}
 
-	Result.bSuccess = true;
-	return Result;
+	return FEditorAutomationResult::Success();
 }

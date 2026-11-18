@@ -41,6 +41,62 @@ struct FEditorAutomationPropertyInfo
 	UPROPERTY(BlueprintReadOnly) FString Name;
 	/** Canonical Type string, e.g. "double" or "struct(/Script/CoreUObject.Vector)". */
 	UPROPERTY(BlueprintReadOnly) FString Type;
+	/** UE display name of the member, for rendered labels. */
+	UPROPERTY(BlueprintReadOnly) FEditorAutomationTextRef DisplayNameText;
+};
+
+/** Failure class of one EditorAutomation operation; the wire value is a plain integer. */
+UENUM(BlueprintType)
+enum class EEditorAutomationResultCode : uint8
+{
+	Success = 0,
+	InvalidArgument = 1,
+	NotFound = 2,
+	WrongType = 3,
+	NotReady = 4,
+	InvalidJson = 5,
+	SerializationFailed = 6,
+	EditorRefused = 7,
+	InternalError = 8
+};
+
+/**
+ * The result envelope every RC-facing EditorAutomation operation returns.
+ *
+ * The call reports whether it succeeded, why it failed and what to do next; the actual data
+ * travels through the function's trailing out parameter (and comes back from Remote Control in
+ * OutParametersJson). CallFunction and CallFunctions keep their own richer envelopes because
+ * they are the dispatcher itself.
+ */
+USTRUCT(BlueprintType)
+struct FEditorAutomationResult
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly) bool bSuccess = true;
+	UPROPERTY(BlueprintReadOnly) EEditorAutomationResultCode ErrorCode = EEditorAutomationResultCode::Success;
+	/** Human-readable reason; empty on success. */
+	UPROPERTY(BlueprintReadOnly) FString ErrorMessage;
+	/** Suggested fix for the caller; empty on success or when there is no specific hint. */
+	UPROPERTY(BlueprintReadOnly) FString Hint;
+
+	static FEditorAutomationResult Success()
+	{
+		return FEditorAutomationResult();
+	}
+
+	static FEditorAutomationResult Failure(
+		const EEditorAutomationResultCode InErrorCode,
+		const FString& InErrorMessage,
+		const FString& InHint = FString())
+	{
+		FEditorAutomationResult Result;
+		Result.bSuccess = false;
+		Result.ErrorCode = InErrorCode;
+		Result.ErrorMessage = InErrorMessage;
+		Result.Hint = InHint;
+		return Result;
+	}
 };
 
 /** Parameter direction; the wire value is a plain integer so Remote Control never emits a display name. */
@@ -205,7 +261,6 @@ struct FEditorAutomationPropertyWrite
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly) bool bSuccess = false;
 	/** The value before the write, as nested JSON text. */
 	UPROPERTY(BlueprintReadOnly) FString OldValueJson;
 	/** The value after the write, as nested JSON text. */
@@ -316,7 +371,7 @@ public:
 	 * @returns "pong" when the plugin module is loaded and the call reached it.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FString Ping();
+	static FEditorAutomationResult Ping(FString& OutValue);
 
 	/**
 	 * Describe the process EditorAutomation is running in.
@@ -326,11 +381,11 @@ public:
 	 * request and to sanity-check an adapter-to-editor connection.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationEditorInfo GetEditorInfo();
+	static FEditorAutomationResult GetEditorInfo(FEditorAutomationEditorInfo& OutInfo);
 
 	/** Start PIE; an empty LevelPath uses the editor's current level. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static bool StartPIE(const FString& LevelPath = TEXT(""), bool bNewWindow = false);
+	static FEditorAutomationResult StartPIE(const FString& LevelPath = TEXT(""), bool bNewWindow = false);
 
 
 
@@ -340,22 +395,19 @@ public:
 	 * Target selects the source: the running PIE game viewport (the "game picture") or the active
 	 * editor window. The game-viewport path is asynchronous: the call only requests the capture and
 	 * the engine writes the file after the next rendered frame, so callers must poll for the file.
-	 * The editor-window path is synchronous and the file exists when this returns (bSuccess).
+	 * The editor-window path is synchronous: the file exists when this call reports success.
 	 * An empty FilePath generates <Project>/Saved/Screenshots/EditorAutomation_<timestamp>.png.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationPIE")
-	static FString CaptureScreenshot(
-		const FString& FilePath,
-		EEditorAutomationScreenshotTarget Target = EEditorAutomationScreenshotTarget::GameViewport,
-		bool bShowUI = true);
+	static FEditorAutomationResult CaptureScreenshot(const FString& FilePath, EEditorAutomationScreenshotTarget Target, bool bShowUI, FString& OutFilePath);
 
 	/** Request the current PIE session to stop. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static bool StopPIE();
+	static FEditorAutomationResult StopPIE();
 
 	/** Whether a PIE session is running or queued. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static bool IsPIERunning();
+	static FEditorAutomationResult IsPIERunning(bool& OutRunning);
 
 	/**
 	 * Bring the running PIE game viewport to the front and make it own keyboard focus, and force
@@ -365,7 +417,7 @@ public:
 	 * while the game viewport owns keyboard focus. A focusable UMG widget would steal it instead.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationPIE")
-	static bool FocusPIEViewport();
+	static FEditorAutomationResult FocusPIEViewport();
 
 	/**
 	 * Simulate one key press (key down + key up) inside the running PIE session.
@@ -375,7 +427,7 @@ public:
 	 * event is routed to the game rather than to whatever editor widget had focus.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationPIE")
-	static bool SendKeyToPIE(const FString& KeyName, bool bFocusViewport = true);
+	static FEditorAutomationResult SendKeyToPIE(const FString& KeyName, bool bFocusViewport = true);
 
 
 	// ------------------------------------------------------------------------
@@ -388,7 +440,7 @@ public:
 	 * @param Type The enum Type, e.g. "enum(/Script/Engine.ECollisionEnabled)".
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationEnumInfo GetEnumInfo(const FString& Type);
+	static FEditorAutomationResult GetEnumInfo(const FString& Type, FEditorAutomationEnumInfo& OutInfo);
 
 	/**
 	 * Describe one struct: every member's name and type.
@@ -396,7 +448,7 @@ public:
 	 * @param Type The struct Type, e.g. "struct(/Script/CoreUObject.Vector)".
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationStructInfo GetStructInfo(const FString& Type);
+	static FEditorAutomationResult GetStructInfo(const FString& Type, FEditorAutomationStructInfo& OutInfo);
 
 	/**
 	 * Describe one class: its properties and BlueprintCallable functions.
@@ -406,7 +458,7 @@ public:
 	 * @param Type The class Type, e.g. "class(/Script/Engine.StaticMeshComponent)".
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationClassInfo GetClassInfo(const FString& Type);
+	static FEditorAutomationResult GetClassInfo(const FString& Type, FEditorAutomationClassInfo& OutInfo);
 
 	/**
 	 * Describe one function of a class: its parameters, directions and return type.
@@ -415,7 +467,7 @@ public:
 	 * @param FunctionName The UFunction name, e.g. "GetClosestPointOnCollision".
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationFunctionInfo GetFunctionInfo(const FString& Type, const FString& FunctionName);
+	static FEditorAutomationResult GetFunctionInfo(const FString& Type, const FString& FunctionName, FEditorAutomationFunctionInfo& OutInfo);
 
 	// ------------------------------------------------------------------------
 	// Object
@@ -432,7 +484,7 @@ public:
 	 *                   instance path such as "/Game/Maps/Map.Map:PersistentLevel.Cube_1".
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FString GetObjectClass(const FString& ObjectPath);
+	static FEditorAutomationResult GetObjectClass(const FString& ObjectPath, FString& OutClassType);
 
 	// ------------------------------------------------------------------------
 	// Property
@@ -447,7 +499,7 @@ public:
 	 * @param PropertyPath The property path, e.g. "RelativeLocation.X".
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationPropertyTypeInfo GetPropertyType(const FString& Type, const FString& PropertyPath);
+	static FEditorAutomationResult GetPropertyType(const FString& Type, const FString& PropertyPath, FEditorAutomationPropertyTypeInfo& OutInfo);
 
 	/**
 	 * Read one property of an object as nested JSON.
@@ -459,7 +511,7 @@ public:
 	 * @param PropertyPath The property path to read.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FString GetPropertyValue(const FString& ObjectPath, const FString& PropertyPath);
+	static FEditorAutomationResult GetPropertyValue(const FString& ObjectPath, const FString& PropertyPath, FString& OutValueJson);
 
 	/**
 	 * Write one property of an object from nested JSON.
@@ -470,11 +522,7 @@ public:
 	 * @param bGenerateTransaction Whether to wrap the write in an editor transaction.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationPropertyWrite SetPropertyValue(
-		const FString& ObjectPath,
-		const FString& PropertyPath,
-		const FString& ValueJson,
-		bool bGenerateTransaction);
+	static FEditorAutomationResult SetPropertyValue(const FString& ObjectPath, const FString& PropertyPath, const FString& ValueJson, bool bGenerateTransaction, FEditorAutomationPropertyWrite& OutWrite);
 
 	// ------------------------------------------------------------------------
 	// Function call
@@ -518,10 +566,6 @@ public:
 	 * can inspect what the editor reported without reading or rotating log files.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation")
-	static FEditorAutomationLogPage GetRecentLog(
-		int32 MaxLines = 200,
-		int32 MinVerbosity = 3,
-		const FString& CategoryFilter = TEXT(""),
-		bool bClear = false);
+	static FEditorAutomationResult GetRecentLog(int32 MaxLines, int32 MinVerbosity, const FString& CategoryFilter, bool bClear, FEditorAutomationLogPage& OutPage);
 };
 

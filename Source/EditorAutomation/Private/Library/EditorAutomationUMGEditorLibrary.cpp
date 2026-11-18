@@ -15,7 +15,7 @@
 #include "Components/PanelWidget.h"
 #include "Components/PanelSlot.h"
 #include "EditorAutomationCoreLibrary.h"
-#include "EditorAutomationLog.h"
+#include "EditorAutomationBlueprintLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "WidgetBlueprintEditor.h"
 #include "BlueprintModes/WidgetBlueprintApplicationModes.h"
@@ -24,19 +24,28 @@
 
 namespace
 {
-	template <typename ResultT>
-	ResultT UMGEditorFailure(const FString& Message)
+	FEditorAutomationResult UMGEditorFailure(const FString& Message)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("%s"), *Message);
-		return ResultT{};
+		return FEditorAutomationResult::Failure(EEditorAutomationResultCode::InvalidArgument, Message);
+	}
+
+	FEditorAutomationResult UMGEditorFailure(
+		const EEditorAutomationResultCode Code,
+		const FString& Message,
+		const FString& Hint = FString())
+	{
+		return FEditorAutomationResult::Failure(Code, Message, Hint);
 	}
 
 	UWidgetBlueprint* LoadWidgetBlueprint(const FString& Path)
 	{
 		if (Path.IsEmpty()) return nullptr;
-	if (UWidgetBlueprint* Found = LoadObject<UWidgetBlueprint>(nullptr, *Path)) return Found;
-	if (!Path.Contains(TEXT("."))) return LoadObject<UWidgetBlueprint>(nullptr, *(Path + TEXT(".") + FPaths::GetBaseFilename(Path)));
-	return nullptr;
+		if (UWidgetBlueprint* Found = LoadObject<UWidgetBlueprint>(nullptr, *Path)) return Found;
+		if (!Path.Contains(TEXT(".")))
+		{
+			return LoadObject<UWidgetBlueprint>(nullptr, *(Path + TEXT(".") + FPaths::GetBaseFilename(Path)));
+		}
+		return nullptr;
 	}
 
 	UWidgetTree* WidgetTreeOf(UWidget* Widget)
@@ -81,43 +90,69 @@ namespace
 	}
 }
 
-bool UEditorAutomationUMGEditorLibrary::OpenWidgetGraph(const FString& WidgetBlueprintPath)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::OpenWidgetGraph(const FString& WidgetBlueprintPath)
 {
 	UWidgetBlueprint* Blueprint = LoadWidgetBlueprint(WidgetBlueprintPath);
-	if (Blueprint == nullptr || GEditor == nullptr) return false;
+	if (Blueprint == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("WidgetBlueprint '%s' could not be loaded."), *WidgetBlueprintPath),
+			TEXT("Pass a WidgetBlueprint asset path (/Game/Dir/WBP) or object path (/Game/Dir/WBP.WBP)."));
+	}
+	if (GEditor == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("The editor is not available."),
+			TEXT("Run this call inside the Unreal editor process."));
+	}
 	UAssetEditorSubsystem* Subsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
-	if (Subsystem == nullptr) return false;
+	if (Subsystem == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("The asset editor subsystem is not available."),
+			TEXT("Run this call inside the Unreal editor process."));
+	}
 	Subsystem->OpenEditorForAsset(Blueprint);
 	IAssetEditorInstance* Instance = Subsystem->FindEditorForAsset(Blueprint, true);
 	if (FWidgetBlueprintEditor* WidgetEditor = static_cast<FWidgetBlueprintEditor*>(Instance))
 	{
 		WidgetEditor->SetCurrentMode(FWidgetBlueprintApplicationModes::GraphMode);
-		return true;
+		return FEditorAutomationResult::Success();
 	}
-	return false;
+	return UMGEditorFailure(
+		EEditorAutomationResultCode::EditorRefused,
+		TEXT("The WidgetBlueprint editor did not open in graph mode."),
+		TEXT("Check GetRecentLog for the editor reason."));
 }
 
-FString UEditorAutomationUMGEditorLibrary::CreateWidgetBlueprint(
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::CreateWidgetBlueprint(
 	const FString& AssetPath,
-	const FString& ParentClassPath)
+	const FString& ParentClassPath,
+	FString& OutWidgetBlueprintPath)
 {
 	if (AssetPath.IsEmpty())
 	{
-		return UMGEditorFailure<FString>(TEXT("AssetPath is required."));
+		return UMGEditorFailure(TEXT("AssetPath is required."));
 	}
 	if (LoadObject<UObject>(nullptr, *AssetPath) != nullptr)
 	{
-		return UMGEditorFailure<FString>(FString::Printf(TEXT("Asset '%s' already exists."), *AssetPath));
+		return UMGEditorFailure(FString::Printf(TEXT("Asset '%s' already exists."), *AssetPath));
 	}
 	UClass* ParentClass = ParentClassPath.IsEmpty() ? UUserWidget::StaticClass() : LoadObject<UClass>(nullptr, *ParentClassPath);
 	if (ParentClass == nullptr || !ParentClass->IsChildOf(UUserWidget::StaticClass()))
 	{
-		return UMGEditorFailure<FString>(TEXT("ParentClassPath must resolve to a UUserWidget subclass."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Parent class '%s' is not a UUserWidget subclass."), *ParentClassPath),
+			TEXT("Pass /Script/UMG.UserWidget or a WidgetBlueprint generated class path."));
 	}
 	UPackage* Package = CreatePackage(*AssetPath);
 	if (Package == nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("Could not create the target package."));
+		return UMGEditorFailure(FString::Printf(TEXT("Could not create the target package '%s'."), *AssetPath));
 	}
 	UWidgetBlueprintFactory* Factory = NewObject<UWidgetBlueprintFactory>();
 	Factory->BlueprintType = BPTYPE_Normal;
@@ -131,112 +166,177 @@ FString UEditorAutomationUMGEditorLibrary::CreateWidgetBlueprint(
 		GWarn));
 	if (Blueprint == nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("WidgetBlueprintFactory failed."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::EditorRefused,
+			TEXT("WidgetBlueprintFactory failed."),
+			TEXT("Check that the path is writable and no asset already exists there."));
 	}
 	FAssetRegistryModule::AssetCreated(Blueprint);
-	return Blueprint->GetPathName();
+	OutWidgetBlueprintPath = Blueprint->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationUMGEditorLibrary::AddRootWidget(
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::AddRootWidget(
 	const FString& WidgetBlueprintPath,
 	const FString& WidgetClassPath,
-	FName WidgetName)
+	const FName WidgetName,
+	FString& OutWidgetPath)
 {
 	UWidgetBlueprint* Blueprint = LoadWidgetBlueprint(WidgetBlueprintPath);
-	UClass* WidgetClass = LoadClass<UWidget>(nullptr, *WidgetClassPath);
 	if (Blueprint == nullptr || Blueprint->WidgetTree == nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("WidgetBlueprint was not loaded."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("WidgetBlueprint '%s' could not be loaded."), *WidgetBlueprintPath),
+			TEXT("Pass a WidgetBlueprint asset path (/Game/Dir/WBP) or object path (/Game/Dir/WBP.WBP)."));
 	}
 	if (Blueprint->WidgetTree->RootWidget != nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("WidgetBlueprint already has a root widget."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("WidgetBlueprint already has a root widget."),
+			TEXT("Use AddWidget on the existing root instead."));
 	}
+	UClass* WidgetClass = LoadClass<UWidget>(nullptr, *WidgetClassPath);
 	if (WidgetClass == nullptr)
 	{
-		return UMGEditorFailure<FString>(FString::Printf(TEXT("Widget class '%s' was not found."), *WidgetClassPath));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Widget class '%s' was not found."), *WidgetClassPath),
+			TEXT("Pass a UMG widget class path, e.g. /Script/UMG.VerticalBox."));
 	}
 	if (WidgetName.IsNone() || Blueprint->WidgetTree->FindWidget(WidgetName) != nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("WidgetName is empty or already used."));
+		return UMGEditorFailure(TEXT("WidgetName is empty or already used."));
 	}
 	UWidget* Root = Blueprint->WidgetTree->ConstructWidget<UWidget>(WidgetClass, WidgetName);
+	if (Root == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::EditorRefused,
+			TEXT("Could not construct the root widget."));
+	}
 	Blueprint->WidgetTree->RootWidget = Root;
 	Blueprint->Modify();
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-	return Root != nullptr ? Root->GetPathName() : FString();
+	OutWidgetPath = Root->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-TArray<UWidget*> UEditorAutomationUMGEditorLibrary::GetWidgetTree(const FString& WidgetBlueprintPath)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::GetWidgetTree(
+	const FString& WidgetBlueprintPath,
+	TArray<UWidget*>& OutWidgets)
 {
-	TArray<UWidget*> Widgets;
 	UWidgetBlueprint* Blueprint = LoadWidgetBlueprint(WidgetBlueprintPath);
-	if (Blueprint == nullptr || Blueprint->WidgetTree == nullptr) return Widgets;
-	CollectWidgets(Blueprint->WidgetTree->RootWidget, Widgets);
-	return Widgets;
+	if (Blueprint == nullptr || Blueprint->WidgetTree == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("WidgetBlueprint '%s' could not be loaded."), *WidgetBlueprintPath),
+			TEXT("Pass a WidgetBlueprint asset path (/Game/Dir/WBP) or object path (/Game/Dir/WBP.WBP)."));
+	}
+	CollectWidgets(Blueprint->WidgetTree->RootWidget, OutWidgets);
+	return FEditorAutomationResult::Success();
 }
 
-UWidget* UEditorAutomationUMGEditorLibrary::GetWidgetParent(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::GetWidgetParent(UWidget* Widget, UWidget*& OutParent)
 {
-	if (Widget == nullptr || Widget->Slot == nullptr) return nullptr;
-	return Widget->Slot->Parent;
+	if (Widget == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path from GetWidgetTree."));
+	}
+	OutParent = Widget->Slot != nullptr ? Widget->Slot->Parent : nullptr;
+	return FEditorAutomationResult::Success();
 }
 
-TArray<UWidget*> UEditorAutomationUMGEditorLibrary::GetWidgetChildren(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::GetWidgetChildren(
+	UWidget* Widget,
+	TArray<UWidget*>& OutChildren)
 {
-	TArray<UWidget*> Children;
-	if (Widget == nullptr) return Children;
-	// A UserWidget's design-time tree hangs off WidgetTree->RootWidget; returning
-	// empty hid NamedSlot content (the slot widget lives inside that tree).
+	if (Widget == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path from GetWidgetTree."));
+	}
+	// A UserWidget's design-time tree hangs off WidgetTree->RootWidget; returning empty hid
+	// NamedSlot content (the slot widget lives inside that tree).
 	if (UUserWidget* UserWidget = Cast<UUserWidget>(Widget))
 	{
 		if (UserWidget->WidgetTree != nullptr && UserWidget->WidgetTree->RootWidget != nullptr)
 		{
-			Children.Add(UserWidget->WidgetTree->RootWidget);
+			OutChildren.Add(UserWidget->WidgetTree->RootWidget);
 		}
-		return Children;
+		return FEditorAutomationResult::Success();
 	}
 	if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
 	{
-		for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index) Children.Add(Panel->GetChildAt(Index));
+		for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index)
+		{
+			OutChildren.Add(Panel->GetChildAt(Index));
+		}
 	}
 	else if (UContentWidget* Content = Cast<UContentWidget>(Widget))
 	{
-		if (Content->GetContent() != nullptr) Children.Add(Content->GetContent());
+		if (Content->GetContent() != nullptr) OutChildren.Add(Content->GetContent());
 	}
-	return Children;
+	return FEditorAutomationResult::Success();
 }
 
-UPanelSlot* UEditorAutomationUMGEditorLibrary::GetWidgetSlot(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::GetWidgetSlot(UWidget* Widget, UPanelSlot*& OutSlot)
 {
-	return Widget != nullptr ? Widget->Slot : nullptr;
+	if (Widget == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a UWidget object path from GetWidgetTree."));
+	}
+	OutSlot = Widget->Slot;
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationUMGEditorLibrary::AddWidget(
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::AddWidget(
 	UWidget* Parent,
 	const FString& WidgetClassPath,
-	FName WidgetName,
-	int32 ChildIndex)
+	const FName WidgetName,
+	int32 ChildIndex,
+	FString& OutWidgetPath)
 {
 	UWidgetTree* Tree = WidgetTreeOf(Parent);
-	UClass* WidgetClass = LoadClass<UWidget>(nullptr, *WidgetClassPath);
 	if (Parent == nullptr || Tree == nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("Parent widget is invalid or not owned by a WidgetTree."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Parent widget is invalid or not owned by a WidgetTree."),
+			TEXT("Pass a template widget object path from GetWidgetTree."));
 	}
+	UClass* WidgetClass = LoadClass<UWidget>(nullptr, *WidgetClassPath);
 	if (WidgetClass == nullptr)
 	{
-		return UMGEditorFailure<FString>(FString::Printf(TEXT("Widget class '%s' was not found."), *WidgetClassPath));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Widget class '%s' was not found."), *WidgetClassPath),
+			TEXT("Pass a UMG widget class path, e.g. /Script/UMG.TextBlock."));
 	}
 	if (WidgetName.IsNone() || Tree->FindWidget(WidgetName) != nullptr)
 	{
-		return UMGEditorFailure<FString>(FString::Printf(TEXT("Widget name '%s' is empty or already used."), *WidgetName.ToString()));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Widget name '%s' is empty or already used."), *WidgetName.ToString()),
+			TEXT("Pass a unique widget name."));
 	}
 
 	UWidget* NewWidget = Tree->ConstructWidget<UWidget>(WidgetClass, WidgetName);
 	if (NewWidget == nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("Could not construct the widget."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::EditorRefused,
+			TEXT("Could not construct the widget."));
 	}
 
 	if (UPanelWidget* Panel = Cast<UPanelWidget>(Parent))
@@ -252,7 +352,7 @@ FString UEditorAutomationUMGEditorLibrary::AddWidget(
 		else
 		{
 			Tree->RemoveWidget(NewWidget);
-			return UMGEditorFailure<FString>(TEXT("ChildIndex is outside the parent's child range."));
+			return UMGEditorFailure(TEXT("ChildIndex is outside the parent's child range."));
 		}
 	}
 	else if (UContentWidget* Content = Cast<UContentWidget>(Parent))
@@ -260,124 +360,157 @@ FString UEditorAutomationUMGEditorLibrary::AddWidget(
 		if (ChildIndex > 0)
 		{
 			Tree->RemoveWidget(NewWidget);
-			return UMGEditorFailure<FString>(TEXT("A content parent supports only child index 0."));
+			return UMGEditorFailure(TEXT("A content parent supports only child index 0."));
 		}
 		Content->SetContent(NewWidget);
 	}
 	else
 	{
 		Tree->RemoveWidget(NewWidget);
-		return UMGEditorFailure<FString>(TEXT("Parent must be a PanelWidget or ContentWidget."));
+		return UMGEditorFailure(TEXT("Parent must be a PanelWidget or ContentWidget."));
 	}
 
 	MarkOwningBlueprintDirty(NewWidget);
-	return NewWidget != nullptr ? NewWidget->GetPathName() : FString();
+	OutWidgetPath = NewWidget->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationUMGEditorLibrary::RemoveWidget(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::RemoveWidget(UWidget* Widget)
 {
 	UWidgetTree* Tree = WidgetTreeOf(Widget);
 	if (Widget == nullptr || Tree == nullptr)
 	{
-		return UMGEditorFailure<bool>(TEXT("Widget is invalid."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is invalid."),
+			TEXT("Pass a template widget object path from GetWidgetTree."));
 	}
 	Tree->RemoveWidget(Widget);
 	MarkOwningBlueprintDirty(Tree->RootWidget);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationUMGEditorLibrary::RenameWidget(UWidget* Widget, FName NewName)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::RenameWidget(
+	UWidget* Widget,
+	const FName NewName,
+	FString& OutWidgetPath)
 {
 	UWidgetTree* Tree = WidgetTreeOf(Widget);
 	if (Widget == nullptr || Tree == nullptr)
 	{
-		return UMGEditorFailure<FString>(TEXT("Widget is invalid."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is invalid."),
+			TEXT("Pass a template widget object path from GetWidgetTree."));
 	}
 	if (NewName.IsNone() || Tree->FindWidget(NewName) != nullptr)
 	{
-		return UMGEditorFailure<FString>(FString::Printf(TEXT("Widget name '%s' is empty or already used."), *NewName.ToString()));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Widget name '%s' is empty or already used."), *NewName.ToString()),
+			TEXT("Pass a unique widget name."));
 	}
 	if (!Widget->Rename(*NewName.ToString(), Tree, REN_DoNotDirty | REN_DontCreateRedirectors))
 	{
-		return UMGEditorFailure<FString>(TEXT("Could not rename the widget."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::EditorRefused,
+			TEXT("Could not rename the widget."));
 	}
 	MarkOwningBlueprintDirty(Widget);
-	return Widget->GetPathName();
+	OutWidgetPath = Widget->GetPathName();
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationUMGEditorLibrary::ReparentWidget(
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::ReparentWidget(
 	UWidget* Widget,
 	UWidget* NewParent,
-	int32 ChildIndex)
+	const int32 ChildIndex)
 {
 	if (Widget == nullptr || NewParent == nullptr)
 	{
-		return UMGEditorFailure<bool>(TEXT("Widget and NewParent are required."));
+		return UMGEditorFailure(TEXT("Widget and NewParent are required."));
 	}
-	UWidget* OldParent = GetWidgetParent(Widget);
+	UWidget* OldParent = Widget->Slot != nullptr ? Widget->Slot->Parent : nullptr;
 	if (OldParent == nullptr)
 	{
-		return UMGEditorFailure<bool>(TEXT("Widget has no parent."));
+		return UMGEditorFailure(TEXT("Widget has no parent."));
 	}
-	if (UPanelWidget* OldPanel = Cast<UPanelWidget>(OldParent)) OldPanel->RemoveChild(Widget);
-	else if (UContentWidget* OldContent = Cast<UContentWidget>(OldParent)) OldContent->SetContent(nullptr);
-	else return UMGEditorFailure<bool>(TEXT("Old parent is unsupported."));
+	if (UPanelWidget* OldPanel = Cast<UPanelWidget>(OldParent))
+	{
+		OldPanel->RemoveChild(Widget);
+	}
+	else if (UContentWidget* OldContent = Cast<UContentWidget>(OldParent))
+	{
+		OldContent->SetContent(nullptr);
+	}
+	else
+	{
+		return UMGEditorFailure(TEXT("Old parent is unsupported."));
+	}
 
 	if (UPanelWidget* NewPanel = Cast<UPanelWidget>(NewParent))
 	{
 		if (ChildIndex >= 0 && ChildIndex <= NewPanel->GetChildrenCount()) NewPanel->InsertChildAt(ChildIndex, Widget);
 		else if (ChildIndex < 0) NewPanel->AddChild(Widget);
-		else return UMGEditorFailure<bool>(TEXT("ChildIndex is outside the new parent's range."));
+		else return UMGEditorFailure(TEXT("ChildIndex is outside the new parent's range."));
 	}
 	else if (UContentWidget* NewContent = Cast<UContentWidget>(NewParent))
 	{
-		if (ChildIndex > 0) return UMGEditorFailure<bool>(TEXT("A content parent supports only child index 0."));
+		if (ChildIndex > 0) return UMGEditorFailure(TEXT("A content parent supports only child index 0."));
 		NewContent->SetContent(Widget);
 	}
 	else
 	{
-		return UMGEditorFailure<bool>(TEXT("NewParent must be a PanelWidget or ContentWidget."));
+		return UMGEditorFailure(TEXT("NewParent must be a PanelWidget or ContentWidget."));
 	}
 	MarkOwningBlueprintDirty(Widget);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationUMGEditorLibrary::SetWidgetProperty(
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::SetWidgetProperty(
 	UWidget* Widget,
 	const FString& PropertyPath,
 	const FString& ValueJson)
 {
 	if (Widget == nullptr)
 	{
-		return UMGEditorFailure<bool>(TEXT("Widget is invalid."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is invalid."),
+			TEXT("Pass a template widget object path from GetWidgetTree."));
 	}
-	const FEditorAutomationPropertyWrite Write = UEditorAutomationCoreLibrary::SetPropertyValue(
-		Widget->GetPathName(), PropertyPath, ValueJson, false);
-	if (!Write.bSuccess)
+	FEditorAutomationPropertyWrite Write;
+	const FEditorAutomationResult WriteResult = UEditorAutomationCoreLibrary::SetPropertyValue(
+		Widget->GetPathName(), PropertyPath, ValueJson, false, Write);
+	if (!WriteResult.bSuccess)
 	{
-		return UMGEditorFailure<bool>(TEXT("Setting the property failed; see the editor log."));
+		return WriteResult;
 	}
 	MarkOwningBlueprintDirty(Widget);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationUMGEditorLibrary::SetWidgetSlotProperty(
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::SetWidgetSlotProperty(
 	UPanelSlot* Slot,
 	const FString& PropertyPath,
 	const FString& ValueJson)
 {
 	if (Slot == nullptr)
 	{
-		return UMGEditorFailure<bool>(TEXT("Slot is invalid."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Slot is invalid."),
+			TEXT("Pass a UPanelSlot object path from GetWidgetSlot."));
 	}
-	const FEditorAutomationPropertyWrite Write = UEditorAutomationCoreLibrary::SetPropertyValue(
-		Slot->GetPathName(), PropertyPath, ValueJson, false);
-	if (!Write.bSuccess)
+	FEditorAutomationPropertyWrite Write;
+	const FEditorAutomationResult WriteResult = UEditorAutomationCoreLibrary::SetPropertyValue(
+		Slot->GetPathName(), PropertyPath, ValueJson, false, Write);
+	if (!WriteResult.bSuccess)
 	{
-		return UMGEditorFailure<bool>(TEXT("Setting the property failed; see the editor log."));
+		return WriteResult;
 	}
 	MarkOwningBlueprintDirty(Slot);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
 namespace
@@ -422,40 +555,81 @@ namespace
 	}
 }
 
-bool UEditorAutomationUMGEditorLibrary::IsWidgetVariable(UWidget* Widget, UBlueprint* WidgetBlueprint)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::IsWidgetVariable(
+	UWidget* Widget,
+	const TSoftObjectPtr<UBlueprint>& WidgetBlueprint,
+	bool& OutIsVariable)
 {
-	if (Widget == nullptr || WidgetBlueprint == nullptr || WidgetBlueprint->GeneratedClass == nullptr)
+	if (Widget == nullptr)
 	{
-		return false;
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a template widget object path from GetWidgetTree."));
 	}
-	return FindFProperty<FProperty>(WidgetBlueprint->GeneratedClass, Widget->GetFName()) != nullptr;
+	UBlueprint* Blueprint = WidgetBlueprint.LoadSynchronous();
+	if (Blueprint == nullptr)
+	{
+		// Remote Control binds a package-only soft path when the caller passes an asset path.
+		const FEditorAutomationResult Resolution =
+			UEditorAutomationBlueprintLibrary::ResolveBlueprintPath(WidgetBlueprint.ToString(), Blueprint);
+		if (!Resolution.bSuccess)
+		{
+			return Resolution;
+		}
+	}
+	if (Blueprint->GeneratedClass == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::NotReady,
+			FString::Printf(TEXT("Blueprint '%s' has no generated class yet; compile it first."), *Blueprint->GetPathName()),
+			TEXT("Call CompileBlueprint, then retry."));
+	}
+	OutIsVariable = FindFProperty<FProperty>(Blueprint->GeneratedClass, Widget->GetFName()) != nullptr;
+	return FEditorAutomationResult::Success();
 }
 
-UWidget* UEditorAutomationUMGEditorLibrary::GetUserWidgetRoot(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::GetUserWidgetRoot(UWidget* Widget, UWidget*& OutRootWidget)
 {
+	if (Widget == nullptr)
+	{
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a template widget object path from GetWidgetTree."));
+	}
 	UUserWidget* UserWidget = OwningUserWidget(Widget);
 	if (UserWidget != nullptr && UserWidget->WidgetTree != nullptr)
 	{
-		return UserWidget->WidgetTree->RootWidget;
+		OutRootWidget = UserWidget->WidgetTree->RootWidget;
+		return FEditorAutomationResult::Success();
 	}
 	// Design-time template tree: there is no UUserWidget instance, so resolve the owning
 	// Widget Blueprint's tree root instead (that is what a template widget's "user root" is).
-	if (UBaseWidgetBlueprint* WidgetBlueprint = Widget != nullptr ? Widget->GetTypedOuter<UBaseWidgetBlueprint>() : nullptr)
+	if (UBaseWidgetBlueprint* WidgetBlueprint = Widget->GetTypedOuter<UBaseWidgetBlueprint>())
 	{
 		if (WidgetBlueprint->WidgetTree != nullptr)
 		{
-			return WidgetBlueprint->WidgetTree->RootWidget;
+			OutRootWidget = WidgetBlueprint->WidgetTree->RootWidget;
+			return FEditorAutomationResult::Success();
 		}
 	}
-	return nullptr;
+	return UMGEditorFailure(
+		EEditorAutomationResultCode::NotFound,
+		FString::Printf(TEXT("Widget '%s' has no owning user-widget root."), *Widget->GetPathName()),
+		TEXT("Pass a widget that belongs to a WidgetBlueprint tree or a live user widget."));
 }
 
-TArray<FEditorAutomationWidgetTextState> UEditorAutomationUMGEditorLibrary::GetWidgetTextActiveStates(UWidget* Widget)
+FEditorAutomationResult UEditorAutomationUMGEditorLibrary::GetWidgetTextActiveStates(
+	UWidget* Widget,
+	TArray<FEditorAutomationWidgetTextState>& OutStates)
 {
-	TArray<FEditorAutomationWidgetTextState> States;
 	if (Widget == nullptr)
 	{
-		return UMGEditorFailure<TArray<FEditorAutomationWidgetTextState>>(TEXT("GetWidgetTextActiveStates: Widget must not be null."));
+		return UMGEditorFailure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Widget is null."),
+			TEXT("Pass a widget or its root from GetWidgetTree."));
 	}
 	const UEnum* VisibilityEnum = StaticEnum<ESlateVisibility>();
 	TArray<UWidget*> Widgets;
@@ -472,7 +646,7 @@ TArray<FEditorAutomationWidgetTextState> UEditorAutomationUMGEditorLibrary::GetW
 			: FString();
 		State.bIsEnabled = TextBlock->GetIsEnabled();
 		State.bIsVisible = TextBlock->IsVisible();
-		States.Add(MoveTemp(State));
+		OutStates.Add(MoveTemp(State));
 	}
-	return States;
+	return FEditorAutomationResult::Success();
 }

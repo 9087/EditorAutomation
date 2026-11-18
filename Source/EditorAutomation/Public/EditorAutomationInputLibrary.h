@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "InputCoreTypes.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "EditorAutomationCoreLibrary.h"
 
 #include "EditorAutomationInputLibrary.generated.h"
 
@@ -158,54 +159,36 @@ public:
 	 * @returns true on success; a reason is logged on failure.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool SendClick(UWidget* Widget, const FEditorAutomationSendClickOptions& Options);
+	static FEditorAutomationResult SendClick(UWidget* Widget, const FEditorAutomationSendClickOptions& Options);
 
-	/**
-	 * Move keyboard focus to one widget (and bring its window to the front).
-	 */
+	/** Move keyboard focus to one widget (and bring its window to the front). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool Focus(UWidget* Widget);
+	static FEditorAutomationResult Focus(UWidget* Widget);
 
-	/**
-	 * Send one key press (down + up) with optional modifier keys.
-	 *
-	 * KeyName is an FKey name ("Space", "Tab", "Enter", "A"...). A key name is a string rather
-	 * than an FKey because FKey has no reflected members, so a string is the form the RC
-	 * dispatcher can carry.
-	 */
+	/** Send one key press (down + up) with optional modifier keys. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool SendKey(const FString& KeyName, const FEditorAutomationModifierKeys& Modifiers);
+	static FEditorAutomationResult SendKey(const FString& KeyName, const FEditorAutomationModifierKeys& Modifiers);
 
-	/**
-	 * Send a string as character events to the focused widget.
-	 */
+	/** Send a string as character events to the focused widget. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool SendText(const FString& Text);
+	static FEditorAutomationResult SendText(const FString& Text);
 
-	/**
-	 * Move the synthetic mouse pointer over one widget at a normalized position.
-	 */
+	/** Move the synthetic mouse pointer over one widget at a normalized position. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool SendMouseMove(UWidget* Widget, FVector2D RelativePosition, const FEditorAutomationModifierKeys& ModifierKeys);
+	static FEditorAutomationResult SendMouseMove(
+		UWidget* Widget,
+		FVector2D RelativePosition,
+		const FEditorAutomationModifierKeys& ModifierKeys);
 
-	/**
-	 * Send one mouse-wheel event at the current pointer position.
-	 */
+	/** Send one mouse-wheel event at the current pointer position. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool SendMouseWheel(UWidget* Widget, float Delta);
+	static FEditorAutomationResult SendMouseWheel(UWidget* Widget, float Delta);
 
-	/**
-	 * Drag from one normalized point to another inside the same widget.
-	 *
-	 * The press → moves → release sequence is driven by a ticker across frames, so
-	 * it never blocks the game thread; poll IsMouseInputPending for completion.
-	 */
+	/** Drag from one normalized point to another inside the same widget (ticker-driven across frames). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool SendDrag(UWidget* Widget, const FEditorAutomationSendDragOptions& Options);
+	static FEditorAutomationResult SendDrag(UWidget* Widget, const FEditorAutomationSendDragOptions& Options);
 
-	/**
-	 * Whether an asynchronous mouse input (a SendDrag) is still running.
-	 */
+	/** Whether an asynchronous mouse input (a SendDrag) is still running. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomation|Input")
-	static bool IsMouseInputPending();
+	static FEditorAutomationResult IsMouseInputPending(bool& OutPending);
 };

@@ -2,8 +2,6 @@
 
 #include "EditorAutomationCoreLibrary.h"
 
-#include "EditorAutomationLog.h"
-
 #include "Reflection/EditorAutomationText.h"
 #include "Reflection/EditorAutomationTypeTree.h"
 
@@ -11,14 +9,6 @@
 
 namespace
 {
-	/** Log one reflection failure and return an empty result; the log is readable through GetRecentLog. */
-	template <typename ResultT>
-	ResultT ReflectionFailure(const FString& Message)
-	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("%s"), *Message);
-		return ResultT{};
-	}
-
 	/** Append one property definition to a property list. */
 	void AddPropertyInfo(TArray<FEditorAutomationPropertyInfo>& Properties, FProperty* Property)
 	{
@@ -30,6 +20,7 @@ namespace
 		FEditorAutomationPropertyInfo Info;
 		Info.Name = Property->GetName();
 		Info.Type = EditorAutomation::FTypeTree::MakeStringFromProperty(Property);
+		Info.DisplayNameText = EditorAutomation::MakeTextRef(Property->GetDisplayNameText());
 		Properties.Add(MoveTemp(Info));
 	}
 
@@ -102,33 +93,44 @@ namespace
 // Reflection
 // ============================================================================
 
-FEditorAutomationEnumInfo UEditorAutomationCoreLibrary::GetEnumInfo(const FString& Type)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetEnumInfo(const FString& Type, FEditorAutomationEnumInfo& OutInfo)
 {
 	if (Type.IsEmpty())
 	{
-		return ReflectionFailure<FEditorAutomationEnumInfo>(TEXT("Type is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Type is empty."),
+			TEXT("Pass the enum Type, e.g. enum(/Script/Engine.ECollisionEnabled)."));
 	}
 
 	EditorAutomation::FTypeTree TypeTree;
 	FString ParseError;
 	if (!EditorAutomation::FTypeTree::TryParse(Type, TypeTree, ParseError))
 	{
-		return ReflectionFailure<FEditorAutomationEnumInfo>(FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError),
+			TEXT("Pass Type in canonical form: enum(/Script/Module.EnumName)."));
 	}
 
 	if (TypeTree.Kind != EditorAutomation::ETypeKind::Enum)
 	{
-		return ReflectionFailure<FEditorAutomationEnumInfo>(FString::Printf(TEXT("Expected enum(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Expected enum(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)),
+			TEXT("GetEnumInfo only accepts enum(...) Types."));
 	}
 
 	UEnum* Enum = LoadObject<UEnum>(nullptr, *TypeTree.Path);
 	if (Enum == nullptr)
 	{
-		return ReflectionFailure<FEditorAutomationEnumInfo>(FString::Printf(TEXT("Enum '%s' could not be loaded."), *TypeTree.Path));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Enum '%s' could not be loaded."), *TypeTree.Path),
+			TEXT("Check the enum path; it must name a loaded UEnum object."));
 	}
 
-	FEditorAutomationEnumInfo Result;
-	Result.Enum = Enum;
+	OutInfo.Enum = Enum;
 	for (int32 Index = 0; Index < Enum->NumEnums(); ++Index)
 	{
 		const FString EntryName = Enum->GetNameStringByIndex(Index);
@@ -143,145 +145,192 @@ FEditorAutomationEnumInfo UEditorAutomationCoreLibrary::GetEnumInfo(const FStrin
 		Entry.Name = EntryName;
 		Entry.DisplayName = Enum->GetDisplayNameTextByIndex(Index).ToString();
 		Entry.Value = Enum->GetValueByIndex(Index);
-		Result.Entries.Add(Entry);
+		OutInfo.Entries.Add(Entry);
 	}
 
-	return Result;
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationStructInfo UEditorAutomationCoreLibrary::GetStructInfo(const FString& Type)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetStructInfo(const FString& Type, FEditorAutomationStructInfo& OutInfo)
 {
 	if (Type.IsEmpty())
 	{
-		return ReflectionFailure<FEditorAutomationStructInfo>(TEXT("Type is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Type is empty."),
+			TEXT("Pass the struct Type, e.g. struct(/Script/CoreUObject.Vector)."));
 	}
 
 	EditorAutomation::FTypeTree TypeTree;
 	FString ParseError;
 	if (!EditorAutomation::FTypeTree::TryParse(Type, TypeTree, ParseError))
 	{
-		return ReflectionFailure<FEditorAutomationStructInfo>(FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError),
+			TEXT("Pass Type in canonical form: struct(/Script/Module.StructName)."));
 	}
 
 	if (TypeTree.Kind != EditorAutomation::ETypeKind::Struct)
 	{
-		return ReflectionFailure<FEditorAutomationStructInfo>(FString::Printf(TEXT("Expected struct(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Expected struct(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)),
+			TEXT("GetStructInfo only accepts struct(...) Types."));
 	}
 
 	UScriptStruct* Struct = LoadObject<UScriptStruct>(nullptr, *TypeTree.Path);
 	if (Struct == nullptr)
 	{
-		return ReflectionFailure<FEditorAutomationStructInfo>(FString::Printf(TEXT("Struct '%s' could not be loaded."), *TypeTree.Path));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Struct '%s' could not be loaded."), *TypeTree.Path),
+			TEXT("Check the struct path; it must name a loaded UScriptStruct object."));
 	}
 
-	FEditorAutomationStructInfo Result;
-	Result.Struct = Struct;
+	OutInfo.Struct = Struct;
 	for (TFieldIterator<FProperty> PropertyIt(Struct); PropertyIt; ++PropertyIt)
 	{
-		AddPropertyInfo(Result.Properties, *PropertyIt);
+		AddPropertyInfo(OutInfo.Properties, *PropertyIt);
 	}
 
-	return Result;
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationClassInfo UEditorAutomationCoreLibrary::GetClassInfo(const FString& Type)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetClassInfo(const FString& Type, FEditorAutomationClassInfo& OutInfo)
 {
 	if (Type.IsEmpty())
 	{
-		return ReflectionFailure<FEditorAutomationClassInfo>(TEXT("Type is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Type is empty."),
+			TEXT("Pass the class Type, e.g. class(/Script/Engine.Actor)."));
 	}
 
 	EditorAutomation::FTypeTree TypeTree;
 	FString ParseError;
 	if (!EditorAutomation::FTypeTree::TryParse(Type, TypeTree, ParseError))
 	{
-		return ReflectionFailure<FEditorAutomationClassInfo>(FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError),
+			TEXT("Pass Type in canonical form: class(/Script/Module.ClassName) or object(/Script/Module.ObjectName)."));
 	}
 
 	if (TypeTree.Kind != EditorAutomation::ETypeKind::Class && TypeTree.Kind != EditorAutomation::ETypeKind::Object)
 	{
-		return ReflectionFailure<FEditorAutomationClassInfo>(FString::Printf(TEXT("Expected class(...) or object(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Expected class(...) or object(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)),
+			TEXT("GetClassInfo accepts class(...) and object(...) Types."));
 	}
 
 	UClass* Class = LoadObject<UClass>(nullptr, *TypeTree.Path);
 	if (Class == nullptr)
 	{
-		return ReflectionFailure<FEditorAutomationClassInfo>(FString::Printf(TEXT("Class '%s' could not be loaded."), *TypeTree.Path));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Class '%s' could not be loaded."), *TypeTree.Path),
+			TEXT("Check the class path; it must name a loaded UClass object. Use GetObjectClass to derive it from an object path."));
 	}
 
-	FEditorAutomationClassInfo Result;
-	Result.Class = Class;
-
+	OutInfo.Class = Class;
 	for (TFieldIterator<FProperty> PropertyIt(Class); PropertyIt; ++PropertyIt)
 	{
-		AddPropertyInfo(Result.Properties, *PropertyIt);
+		AddPropertyInfo(OutInfo.Properties, *PropertyIt);
 	}
 	for (TFieldIterator<UFunction> FunctionIt(Class); FunctionIt; ++FunctionIt)
 	{
-		AddFunctionInfo(Result.Functions, *FunctionIt);
+		AddFunctionInfo(OutInfo.Functions, *FunctionIt);
 	}
 
-	return Result;
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationFunctionInfo UEditorAutomationCoreLibrary::GetFunctionInfo(const FString& Type, const FString& FunctionName)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetFunctionInfo(
+	const FString& Type,
+	const FString& FunctionName,
+	FEditorAutomationFunctionInfo& OutInfo)
 {
 	if (Type.IsEmpty())
 	{
-		return ReflectionFailure<FEditorAutomationFunctionInfo>(TEXT("Type is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("Type is empty."),
+			TEXT("Pass the class Type, e.g. class(/Script/Engine.Actor)."));
 	}
-
 	if (FunctionName.IsEmpty())
 	{
-		return ReflectionFailure<FEditorAutomationFunctionInfo>(TEXT("FunctionName is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("FunctionName is empty."),
+			TEXT("Pass the UFunction name, e.g. K2_GetActorLocation."));
 	}
 
 	EditorAutomation::FTypeTree TypeTree;
 	FString ParseError;
 	if (!EditorAutomation::FTypeTree::TryParse(Type, TypeTree, ParseError))
 	{
-		return ReflectionFailure<FEditorAutomationFunctionInfo>(FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("Type '%s' is not valid: %s"), *Type, *ParseError),
+			TEXT("Pass Type in canonical form: class(/Script/Module.ClassName)."));
 	}
 
 	if (TypeTree.Kind != EditorAutomation::ETypeKind::Class && TypeTree.Kind != EditorAutomation::ETypeKind::Object)
 	{
-		return ReflectionFailure<FEditorAutomationFunctionInfo>(FString::Printf(TEXT("Expected class(...) or object(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::WrongType,
+			FString::Printf(TEXT("Expected class(...) or object(...) but got %s(...)."), *EditorAutomation::FTypeTree::KindName(TypeTree.Kind)),
+			TEXT("GetFunctionInfo accepts class(...) and object(...) Types."));
 	}
 
 	UClass* Class = LoadObject<UClass>(nullptr, *TypeTree.Path);
 	if (Class == nullptr)
 	{
-		return ReflectionFailure<FEditorAutomationFunctionInfo>(FString::Printf(TEXT("Class '%s' could not be loaded."), *TypeTree.Path));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Class '%s' could not be loaded."), *TypeTree.Path),
+			TEXT("Check the class path; it must name a loaded UClass object."));
 	}
 
 	UFunction* Function = Class->FindFunctionByName(FName(*FunctionName));
 	if (Function == nullptr)
 	{
-		return ReflectionFailure<FEditorAutomationFunctionInfo>(FString::Printf(TEXT("Function '%s' was not found on '%s'."), *FunctionName, *Class->GetName()));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Function '%s' was not found on '%s'."), *FunctionName, *Class->GetName()),
+			TEXT("Call GetClassInfo on the same Type and pick a function from its Functions list."));
 	}
 
-	FEditorAutomationFunctionInfo Result;
-	BuildFunctionInfo(Result, Function);
-	return Result;
+	BuildFunctionInfo(OutInfo, Function);
+	return FEditorAutomationResult::Success();
 }
 
 // ============================================================================
 // Object
 // ============================================================================
 
-FString UEditorAutomationCoreLibrary::GetObjectClass(const FString& ObjectPath)
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetObjectClass(const FString& ObjectPath, FString& OutClassType)
 {
 	if (ObjectPath.IsEmpty())
 	{
-		return ReflectionFailure<FString>(TEXT("GetObjectClass: ObjectPath is empty."));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			TEXT("ObjectPath is empty."),
+			TEXT("Pass a full object path, e.g. /Script/Engine.Default__StaticMeshComponent."));
 	}
 
 	UObject* Object = LoadObject<UObject>(nullptr, *ObjectPath);
 	if (Object == nullptr)
 	{
-		return ReflectionFailure<FString>(FString::Printf(TEXT("GetObjectClass: object '%s' could not be loaded."), *ObjectPath));
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Object '%s' could not be loaded."), *ObjectPath),
+			TEXT("Check the object path; it must name a loaded object. Level instances need their full path with :PersistentLevel."));
 	}
 
 	// MakeStringFromClass returns the canonical class(...) Type that GetClassInfo/GetFunctionInfo accept.
-	return EditorAutomation::FTypeTree::MakeStringFromClass(Object->GetClass());
+	OutClassType = EditorAutomation::FTypeTree::MakeStringFromClass(Object->GetClass());
+	return FEditorAutomationResult::Success();
 }

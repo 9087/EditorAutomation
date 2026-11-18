@@ -4,7 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+
+#include "EditorAutomationCoreLibrary.h"
+
 #include "EditorAutomationAssetLibrary.generated.h"
+
+class UObject;
 
 USTRUCT(BlueprintType)
 struct FEditorAutomationAssetInfo
@@ -41,29 +46,34 @@ class EDITORAUTOMATION_API UEditorAutomationAssetLibrary : public UBlueprintFunc
 public:
 	/** List assets under a content directory, optionally recursive and filtered by class. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static TArray<FString> ListAssets(
+	static FEditorAutomationResult ListAssets(
 		const FString& DirectoryPath,
-		bool bRecursive = false,
-		const FString& ClassPath = TEXT(""));
+		bool bRecursive,
+		const FString& ClassPath,
+		TArray<FString>& OutAssets);
 
 	/** List child folders under a content directory. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static TArray<FString> ListFolders(const FString& DirectoryPath, bool bRecursive = false);
+	static FEditorAutomationResult ListFolders(
+		const FString& DirectoryPath,
+		bool bRecursive,
+		TArray<FString>& OutFolders);
 
 	/** Get one asset's registry info; AssetClass is null when the asset is not registered. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static FEditorAutomationAssetInfo GetAssetInfo(const FString& AssetPath);
+	static FEditorAutomationResult GetAssetInfo(const FString& AssetPath, FEditorAutomationAssetInfo& OutInfo);
 
+	/** Whether one asset is registered; the answer is data, so a missing asset is still a success. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static bool DoesAssetExist(const FString& AssetPath);
+	static FEditorAutomationResult DoesAssetExist(const FString& AssetPath, bool& OutExists);
 
 	/** Load one asset and hold a strong reference in the asset cache. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static UObject* LoadAsset(const FString& AssetPath);
+	static FEditorAutomationResult LoadAsset(const FString& AssetPath, UObject*& OutAsset);
 
 	/** Release the cache's strong reference; does not force a GC. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static bool UnloadAsset(const FString& AssetPath);
+	static FEditorAutomationResult UnloadAsset(const FString& AssetPath);
 
 	/**
 	 * Every loaded package with unsaved changes (maps and content; transient packages are skipped).
@@ -72,20 +82,18 @@ public:
 	 * user whether to save; SaveAssets performs the save without any dialog.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static TArray<FEditorAutomationDirtyAssetInfo> GetDirtyAssets();
+	static FEditorAutomationResult GetDirtyAssets(TArray<FEditorAutomationDirtyAssetInfo>& OutDirtyAssets);
 
 	/**
 	 * Silently save the given assets/packages (no save dialog).
 	 *
 	 * Asset paths ("/Game/UI/WBP_X.WBP_X"), package names ("/Game/UI/WBP_X") and disk
 	 * filenames are accepted. An empty list saves every currently dirty package.
-	 *
-	 * @returns true when every package was saved; failures are logged.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static bool SaveAssets(const TArray<FString>& AssetOrPackagePaths, bool bOnlyDirty = true);
+	static FEditorAutomationResult SaveAssets(const TArray<FString>& AssetOrPackagePaths, bool bOnlyDirty);
 
 	/** Silently save every dirty map/content package (shortcut for SaveAssets with an empty list). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationAsset")
-	static bool SaveAllDirtyAssets();
+	static FEditorAutomationResult SaveAllDirtyAssets();
 };

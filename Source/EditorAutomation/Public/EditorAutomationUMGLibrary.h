@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "EditorAutomationCoreLibrary.h"
 #include "EditorAutomationInputLibrary.h"
 #include "EditorAutomationUMGLibrary.generated.h"
 
@@ -52,8 +53,6 @@ struct FEditorAutomationListEntryInfo
 {
 	GENERATED_BODY()
 
-	/** False when the item has no row widget yet (virtualized out of view) or the input is invalid. */
-	UPROPERTY(BlueprintReadOnly) bool bSuccess = true;
 	/** Item index this row belongs to. */
 	UPROPERTY(BlueprintReadOnly) int32 Index = 0;
 	/** The item's row widget, or null when no row exists yet. */
@@ -68,8 +67,6 @@ struct FEditorAutomationListViewInfo
 {
 	GENERATED_BODY()
 
-	/** False when the widget is not a UListView. */
-	UPROPERTY(BlueprintReadOnly) bool bSuccess = true;
 	/** Number of items in the list. */
 	UPROPERTY(BlueprintReadOnly) int32 ItemCount = 0;
 	UPROPERTY(BlueprintReadOnly) TArray<FEditorAutomationListItemInfo> Items;
@@ -136,64 +133,55 @@ class EDITORAUTOMATION_API UEditorAutomationUMGLibrary : public UBlueprintFuncti
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static TArray<FString> GetWidgetRoots();
+	static FEditorAutomationResult GetWidgetRoots(TArray<FString>& OutRoots);
 
+	/** Asset path of the WidgetBlueprint that owns this widget. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FString GetWidgetBlueprintPath(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetBlueprintPath(UWidget* Widget, FString& OutBlueprintPath);
 
+	/** Class path of this widget. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FString GetWidgetClassPath(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetClassPath(UWidget* Widget, FString& OutClassPath);
 
+	/** Diff the live widget tree against the previous read (first read reports every node as Add). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FEditorAutomationWidgetTreeDiff GetWidgetTreeDiff(UUserWidget* RootWidget);
+	static FEditorAutomationResult GetWidgetTreeDiff(UUserWidget* RootWidget, FEditorAutomationWidgetTreeDiff& OutDiff);
 
+	/** Drop the cached widget-tree snapshot for one root. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static void ResetWidgetTreeCache(UUserWidget* RootWidget);
+	static FEditorAutomationResult ResetWidgetTreeCache(UUserWidget* RootWidget);
 
-	/** Resolved widget geometry; an empty/zero struct means the widget is missing or not laid out yet (logged). */
+	/** Resolved widget geometry. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FEditorAutomationWidgetGeometry GetWidgetGeometry(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetGeometry(UWidget* Widget, FEditorAutomationWidgetGeometry& OutGeometry);
 
-	/**
-	 * Read the items held by a UMG UListView.
-	 *
-	 * @param Widget   The list widget; must be (or derive from) UListView.
-	 * @param MaxItems Keep at most this many items; 0 means all.
-	 */
+	/** Read the items held by a UMG UListView. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FEditorAutomationListViewInfo GetListViewInfo(UWidget* Widget, int32 MaxItems = 0);
+	static FEditorAutomationResult GetListViewInfo(UWidget* Widget, int32 MaxItems, FEditorAutomationListViewInfo& OutInfo);
 
-	/**
-	 * Read the row widget of one list item, when that item is on screen.
-	 */
+	/** Read the row widget of one list item, when that item is on screen. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FEditorAutomationListEntryInfo GetListEntryInfo(UWidget* Widget, int32 Index);
+	static FEditorAutomationResult GetListEntryInfo(UWidget* Widget, int32 Index, FEditorAutomationListEntryInfo& OutEntry);
 
-	/**
-	 * Scroll a list so the requested item's row exists, then return that row.
-	 */
+	/** Scroll a list so the requested item's row exists, then return that row. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FEditorAutomationListEntryInfo ScrollToListEntry(UWidget* Widget, int32 Index);
+	static FEditorAutomationResult ScrollToListEntry(UWidget* Widget, int32 Index, FEditorAutomationListEntryInfo& OutEntry);
 
 	/**
 	 * Scroll a list to one item and click its row.
 	 *
-	 * A row created by this call has not been drawn yet, so the click is not
-	 * dispatched in the same call; the function logs that and returns false —
-	 * call it again to click the now-drawn row.
+	 * A row created by this call is not drawn yet, so the click is deferred: the call fails
+	 * with NotReady and the next call clicks the now-drawn row.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static bool ScrollToListEntryAndSendClick(UWidget* Widget, int32 Index, const FEditorAutomationSendClickOptions& Options);
+	static FEditorAutomationResult ScrollToListEntryAndSendClick(UWidget* Widget, int32 Index, const FEditorAutomationSendClickOptions& Options);
 
-	/**
-	 * Render one widget off-screen into a PNG file (UI included, no viewport needed).
-	 *
-	 * @param Widget     The widget to render.
-	 * @param OutputPath Absolute PNG path; empty generates <Project>/Saved/Screenshots/EditorAutomation_<stamp>.png.
-	 * @param Width      Render width; 0 uses the widget's current/desired width.
-	 * @param Height     Render height; 0 uses the widget's current/desired height.
-	 * @returns the written PNG path, or an empty string on failure (the reason is logged).
-	 */
+	/** Render one widget off-screen into a PNG file; OutFilePath receives the written path. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMG")
-	static FString CaptureWidgetScreenshot(UWidget* Widget, const FString& OutputPath = TEXT(""), int32 Width = 0, int32 Height = 0);
+	static FEditorAutomationResult CaptureWidgetScreenshot(
+		UWidget* Widget,
+		const FString& OutputPath,
+		int32 Width,
+		int32 Height,
+		FString& OutFilePath);
 };

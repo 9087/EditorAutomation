@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "EditorAutomationCoreLibrary.h"
 #include "EditorAutomationUMGEditorLibrary.generated.h"
 
 class UBlueprint;
@@ -37,89 +38,88 @@ class EDITORAUTOMATION_API UEditorAutomationUMGEditorLibrary : public UBlueprint
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static bool OpenWidgetGraph(const FString& WidgetBlueprintPath);
+	static FEditorAutomationResult OpenWidgetGraph(const FString& WidgetBlueprintPath);
 
-	/** Create a Widget Blueprint asset; returns its object path, or empty (logged) on failure. */
+	/** Create a Widget Blueprint asset; OutWidgetBlueprintPath receives its object path. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static FString CreateWidgetBlueprint(
+	static FEditorAutomationResult CreateWidgetBlueprint(
 		const FString& AssetPath,
-		const FString& ParentClassPath = TEXT(""));
+		const FString& ParentClassPath,
+		FString& OutWidgetBlueprintPath);
 
-	/** Add the first root widget; returns the new widget's object path, or empty (logged) on failure. */
+	/** Add the first root widget; OutWidgetPath receives the new widget's object path. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static FString AddRootWidget(
+	static FEditorAutomationResult AddRootWidget(
 		const FString& WidgetBlueprintPath,
 		const FString& WidgetClassPath,
-		FName WidgetName);
+		FName WidgetName,
+		FString& OutWidgetPath);
 
+	/** Read the design-time widget tree of one Widget Blueprint (root first, depth-first). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static TArray<UWidget*> GetWidgetTree(const FString& WidgetBlueprintPath);
+	static FEditorAutomationResult GetWidgetTree(const FString& WidgetBlueprintPath, TArray<UWidget*>& OutWidgets);
 
+	/** Parent widget; null for a root widget (that is data, not an error). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static UWidget* GetWidgetParent(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetParent(UWidget* Widget, UWidget*& OutParent);
 
+	/** Child widgets (NamedSlot content included). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static TArray<UWidget*> GetWidgetChildren(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetChildren(UWidget* Widget, TArray<UWidget*>& OutChildren);
 
+	/** Slot widget; null for a root widget (that is data, not an error). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static UPanelSlot* GetWidgetSlot(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetSlot(UWidget* Widget, UPanelSlot*& OutSlot);
 
-	/** Add a widget under a panel/content parent; returns the new widget's object path, or empty (logged) on failure. */
+	/** Add a widget under a panel/content parent; OutWidgetPath receives the new widget's object path. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static FString AddWidget(
+	static FEditorAutomationResult AddWidget(
 		UWidget* Parent,
 		const FString& WidgetClassPath,
 		FName WidgetName,
-		int32 ChildIndex = -1);
+		int32 ChildIndex,
+		FString& OutWidgetPath);
 
-	/** Remove a widget; returns false (logged) when the widget is invalid. */
+	/** Remove a widget. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static bool RemoveWidget(UWidget* Widget);
+	static FEditorAutomationResult RemoveWidget(UWidget* Widget);
 
-	/** Rename a widget; returns the new object path, or empty (logged) on failure. */
+	/** Rename a widget; OutWidgetPath receives the new object path. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static FString RenameWidget(UWidget* Widget, FName NewName);
+	static FEditorAutomationResult RenameWidget(UWidget* Widget, FName NewName, FString& OutWidgetPath);
 
-	/** Move a widget under another parent; returns false (logged) when a parent/index is unsupported. */
+	/** Move a widget under another parent. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static bool ReparentWidget(
-		UWidget* Widget,
-		UWidget* NewParent,
-		int32 ChildIndex = -1);
+	static FEditorAutomationResult ReparentWidget(UWidget* Widget, UWidget* NewParent, int32 ChildIndex);
 
-	/** Write one widget property through the core property writer; returns false (logged) on failure. */
+	/** Write one widget property through the core property writer. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static bool SetWidgetProperty(
+	static FEditorAutomationResult SetWidgetProperty(
 		UWidget* Widget,
 		const FString& PropertyPath,
 		const FString& ValueJson);
 
-	/** Write one widget slot property through the core property writer; returns false (logged) on failure. */
+	/** Write one widget slot property through the core property writer. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static bool SetWidgetSlotProperty(
+	static FEditorAutomationResult SetWidgetSlotProperty(
 		UPanelSlot* Slot,
 		const FString& PropertyPath,
 		const FString& ValueJson);
 
-
-
-
-	/**
-	 * Whether a widget name is exposed as a variable of one Widget Blueprint.
-	 */
+	/** Whether a widget name is exposed as a variable of one Widget Blueprint. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static bool IsWidgetVariable(UWidget* Widget, UBlueprint* WidgetBlueprint);
+	static FEditorAutomationResult IsWidgetVariable(
+		UWidget* Widget,
+		const TSoftObjectPtr<UBlueprint>& WidgetBlueprint,
+		bool& OutIsVariable);
 
-	/**
-	 * The root widget of the user widget that owns this widget (walking up outers).
-	 */
+	/** The root widget of the user widget that owns this widget (design-time trees use the Widget Blueprint root). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static UWidget* GetUserWidgetRoot(UWidget* Widget);
+	static FEditorAutomationResult GetUserWidgetRoot(UWidget* Widget, UWidget*& OutRootWidget);
 
-
-	/**
-	 * Collect every UTextBlock in one subtree with its text and current visual state.
-	 */
+	/** Every UTextBlock in one subtree with its text and current visual state. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationUMGEditor")
-	static TArray<FEditorAutomationWidgetTextState> GetWidgetTextActiveStates(UWidget* Widget);
+	static FEditorAutomationResult GetWidgetTextActiveStates(
+		UWidget* Widget,
+		TArray<FEditorAutomationWidgetTextState>& OutStates);
 };

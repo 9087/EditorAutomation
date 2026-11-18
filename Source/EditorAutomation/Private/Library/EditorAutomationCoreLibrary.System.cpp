@@ -2,8 +2,6 @@
 
 #include "EditorAutomationCoreLibrary.h"
 
-#include "EditorAutomationLog.h"
-
 #include "CoreGlobals.h"
 #include "Editor.h"
 #include "PlayInEditorDataTypes.h"
@@ -15,6 +13,7 @@
 #include "Misc/App.h"
 #include "Misc/DateTime.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
 #include "Subsystems/AssetEditorSubsystem.h"
@@ -32,37 +31,41 @@
 // System
 // ============================================================================
 
-FString UEditorAutomationCoreLibrary::Ping()
+FEditorAutomationResult UEditorAutomationCoreLibrary::Ping(FString& OutValue)
 {
-	return TEXT("pong");
+	OutValue = TEXT("pong");
+	return FEditorAutomationResult::Success();
 }
 
-FEditorAutomationEditorInfo UEditorAutomationCoreLibrary::GetEditorInfo()
+FEditorAutomationResult UEditorAutomationCoreLibrary::GetEditorInfo(FEditorAutomationEditorInfo& OutInfo)
 {
-	FEditorAutomationEditorInfo Info;
-	Info.ProcessId = static_cast<int64>(FPlatformProcess::GetCurrentProcessId());
-	Info.EngineVersion = FEngineVersion::Current().ToString();
-	Info.ProjectName = FApp::GetProjectName();
-	Info.ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	Info.bIsEditor = GIsEditor;
-	return Info;
+	OutInfo.ProcessId = static_cast<int64>(FPlatformProcess::GetCurrentProcessId());
+	OutInfo.EngineVersion = FEngineVersion::Current().ToString();
+	OutInfo.ProjectName = FApp::GetProjectName();
+	OutInfo.ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	OutInfo.bIsEditor = GIsEditor;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationCoreLibrary::StartPIE(const FString& LevelPath, bool bNewWindow)
+FEditorAutomationResult UEditorAutomationCoreLibrary::StartPIE(const FString& LevelPath, const bool bNewWindow)
 {
 	if (!IsInGameThread() || GEditor == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("StartPIE must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("StartPIE must be called on the game thread."),
+			TEXT("Retry from the editor's game thread; Remote Control calls normally already run there."));
 	}
 	if (GEditor->IsPlaySessionInProgress())
 	{
-		return true;
+		return FEditorAutomationResult::Success();
 	}
 	if (!LevelPath.IsEmpty() && !FPackageName::DoesPackageExist(LevelPath))
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("StartPIE: Level '%s' does not exist."), *LevelPath);
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotFound,
+			FString::Printf(TEXT("Level '%s' does not exist."), *LevelPath),
+			TEXT("Pass a package path that exists, e.g. /Game/Maps/L_MyMap, or an empty path to use the current level."));
 	}
 	FRequestPlaySessionParams Params;
 	if (!LevelPath.IsEmpty()) Params.GlobalMapOverride = LevelPath;
@@ -75,18 +78,21 @@ bool UEditorAutomationCoreLibrary::StartPIE(const FString& LevelPath, bool bNewW
 		Params.DestinationSlateViewport = LevelEditorModule.GetFirstActiveViewport();
 	}
 	GEditor->RequestPlaySession(Params);
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-FString UEditorAutomationCoreLibrary::CaptureScreenshot(
+FEditorAutomationResult UEditorAutomationCoreLibrary::CaptureScreenshot(
 	const FString& FilePath,
 	const EEditorAutomationScreenshotTarget Target,
-	const bool bShowUI)
+	const bool bShowUI,
+	FString& OutFilePath)
 {
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureScreenshot must be called on the game thread."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("CaptureScreenshot must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 
 	FString ResolvedPath = FilePath;
@@ -105,56 +111,71 @@ FString UEditorAutomationCoreLibrary::CaptureScreenshot(
 		const TSharedPtr<SWindow> Window = FSlateApplication::Get().GetActiveTopLevelWindow();
 		if (!Window.IsValid())
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("CaptureScreenshot: no active editor window to capture."));
-			return FString();
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::NotReady,
+				TEXT("No active editor window to capture."),
+				TEXT("Focus the editor window first, or capture the game viewport with Target=GameViewport."));
 		}
 		TArray<FColor> Pixels;
 		FIntVector Size;
 		if (!FSlateApplication::Get().TakeScreenshot(Window.ToSharedRef(), Pixels, Size))
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("CaptureScreenshot: Slate window screenshot failed."));
-			return FString();
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::EditorRefused,
+				TEXT("Slate window screenshot failed."),
+				TEXT("The window may be minimized or driven by a renderer without screenshot support."));
 		}
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Size.X, Size.Y, Pixels, Png);
 		if (Png.Num() == 0)
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("CaptureScreenshot: PNG compression produced no data."));
-			return FString();
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::InternalError,
+				TEXT("PNG compression produced no data."),
+				TEXT("This is an EditorAutomation/engine bug; report the capture that produced it."));
 		}
 		TArray<uint8> PngBytes;
 		PngBytes.Append(Png.GetData(), static_cast<int32>(Png.Num()));
 		if (!FFileHelper::SaveArrayToFile(PngBytes, *ResolvedPath))
 		{
-			UE_LOG(LogEditorAutomation, Error, TEXT("CaptureScreenshot: could not write '%s'."), *ResolvedPath);
-			return FString();
+			return FEditorAutomationResult::Failure(
+				EEditorAutomationResultCode::EditorRefused,
+				FString::Printf(TEXT("Could not write '%s'."), *ResolvedPath),
+				TEXT("Check that the directory exists and is writable."));
 		}
-		return ResolvedPath;
+		OutFilePath = ResolvedPath;
+		return FEditorAutomationResult::Success();
 	}
 
 	if (GEngine == nullptr || GEngine->GameViewport == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("CaptureScreenshot: no PIE game viewport; start PIE before capturing the game viewport."));
-		return FString();
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("No PIE game viewport is available."),
+			TEXT("Start PIE before capturing the game viewport."));
 	}
 	FScreenshotRequest::RequestScreenshot(ResolvedPath, bShowUI, /*bAddFilenameSuffix=*/false);
-	return ResolvedPath;
+	OutFilePath = ResolvedPath;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationCoreLibrary::StopPIE()
+FEditorAutomationResult UEditorAutomationCoreLibrary::StopPIE()
 {
 	if (!IsInGameThread() || GEditor == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("StopPIE must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("StopPIE must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	GEditor->RequestEndPlayMap();
-	return true;
+	return FEditorAutomationResult::Success();
 }
 
-bool UEditorAutomationCoreLibrary::IsPIERunning()
+FEditorAutomationResult UEditorAutomationCoreLibrary::IsPIERunning(bool& OutRunning)
 {
-	return IsInGameThread() && GEditor != nullptr && GEditor->IsPlaySessionInProgress();
+	OutRunning = IsInGameThread() && GEditor != nullptr && GEditor->IsPlaySessionInProgress();
+	return FEditorAutomationResult::Success();
 }
 
 namespace
@@ -167,18 +188,22 @@ namespace
 	}
 }
 
-bool UEditorAutomationCoreLibrary::FocusPIEViewport()
+FEditorAutomationResult UEditorAutomationCoreLibrary::FocusPIEViewport()
 {
 	if (!IsInGameThread() || GEngine == nullptr || GEditor == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("FocusPIEViewport must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("FocusPIEViewport must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
 	TSharedPtr<SViewport> ViewportWidget = GetPIEViewportWidget();
 	if (!ViewportWidget.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("FocusPIEViewport: no PIE game viewport is currently shown."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("No PIE game viewport is currently shown."),
+			TEXT("Start PIE first."));
 	}
 
 	FSlateApplication& SlateApp = FSlateApplication::Get();
@@ -198,24 +223,33 @@ bool UEditorAutomationCoreLibrary::FocusPIEViewport()
 			PlayerController->SetInputMode(InputMode);
 		}
 	}
-	return true;
+	return FEditorAutomationResult::Success();
 }
-bool UEditorAutomationCoreLibrary::SendKeyToPIE(const FString& KeyName, bool bFocusViewport)
+
+FEditorAutomationResult UEditorAutomationCoreLibrary::SendKeyToPIE(const FString& KeyName, const bool bFocusViewport)
 {
 	if (!IsInGameThread() || GEngine == nullptr)
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendKeyToPIE must be called on the game thread."));
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::NotReady,
+			TEXT("SendKeyToPIE must be called on the game thread."),
+			TEXT("Retry from the editor's game thread."));
 	}
-	FKey Key(*KeyName);
+	const FKey Key(*KeyName);
 	if (!Key.IsValid())
 	{
-		UE_LOG(LogEditorAutomation, Error, TEXT("SendKeyToPIE: '%s' is not a valid FKey name."), *KeyName);
-		return false;
+		return FEditorAutomationResult::Failure(
+			EEditorAutomationResultCode::InvalidArgument,
+			FString::Printf(TEXT("'%s' is not a valid FKey name."), *KeyName),
+			TEXT("Pass an FKey name such as Enter, SpaceBar, Tab, Escape, Up, Down, Left, Right, W, A, S, D or R."));
 	}
-	if (bFocusViewport && !FocusPIEViewport())
+	if (bFocusViewport)
 	{
-		return false;
+		const FEditorAutomationResult FocusResult = FocusPIEViewport();
+		if (!FocusResult.bSuccess)
+		{
+			return FocusResult;
+		}
 	}
 
 	// The modifier state is whatever Slate currently reports, matching the pre-existing
@@ -226,5 +260,5 @@ bool UEditorAutomationCoreLibrary::SendKeyToPIE(const FString& KeyName, bool bFo
 	SlateApp.ProcessKeyDownEvent(KeyDownEvent);
 	FKeyEvent KeyUpEvent(Key, ModifierKeys, /*InUserIndex=*/0, /*bInIsRepeat=*/false, /*InCharacterCode=*/0, /*InKeyCode=*/0);
 	SlateApp.ProcessKeyUpEvent(KeyUpEvent);
-	return true;
+	return FEditorAutomationResult::Success();
 }

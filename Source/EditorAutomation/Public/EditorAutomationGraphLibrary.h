@@ -4,6 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+
+#include "EditorAutomationCoreLibrary.h"
+
 #include "EditorAutomationGraphLibrary.generated.h"
 
 class UBlueprint;
@@ -73,31 +76,43 @@ class EDITORAUTOMATION_API UEditorAutomationGraphLibrary : public UBlueprintFunc
 	GENERATED_BODY()
 
 public:
+	/** List the graphs of a Blueprint (event graphs, function graphs, macros). */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static TArray<FEditorAutomationBlueprintGraphInfo> GetBlueprintGraphs(const TSoftObjectPtr<UBlueprint>& Blueprint);
+	static FEditorAutomationResult GetBlueprintGraphs(
+		const TSoftObjectPtr<UBlueprint>& Blueprint,
+		TArray<FEditorAutomationBlueprintGraphInfo>& OutGraphs);
 
+	/** List the nodes of one graph; bRecursive also walks macro and collapsed sub-graphs. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static TArray<FEditorAutomationGraphNodeInfo> GetGraphNodes(UEdGraph* Graph, bool bRecursive = false);
+	static FEditorAutomationResult GetGraphNodes(
+		UEdGraph* Graph,
+		bool bRecursive,
+		TArray<FEditorAutomationGraphNodeInfo>& OutNodes);
 
+	/** List the pins of one node. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static TArray<FEditorAutomationGraphPinInfo> GetNodePins(UEdGraphNode* Node);
+	static FEditorAutomationResult GetNodePins(
+		UEdGraphNode* Node,
+		TArray<FEditorAutomationGraphPinInfo>& OutPins);
 
-	/** Add a function-call node; returns the new node's object path, or empty (logged) on failure. */
+	/** Add a function-call node; returns the new node path through OutNodeObjectPath. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static FString AddCallFunctionNode(
+	static FEditorAutomationResult AddCallFunctionNode(
 		UEdGraph* Graph,
 		const FString& FunctionOwnerClassPath,
 		const FString& FunctionName,
 		int32 NodePosX,
-		int32 NodePosY);
+		int32 NodePosY,
+		FString& OutNodeObjectPath);
 
-	/** Add an event node; returns the new node's object path, or empty (logged) on failure. */
+	/** Add an override-event node; returns the new node path through OutNodeObjectPath. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static FString AddEventNode(
+	static FEditorAutomationResult AddEventNode(
 		UEdGraph* Graph,
 		const FString& EventName,
 		int32 NodePosX,
-		int32 NodePosY);
+		int32 NodePosY,
+		FString& OutNodeObjectPath);
 
 	/**
 	 * Add a component-bound event node (for example a widget Button's OnClicked) to a graph.
@@ -105,38 +120,35 @@ public:
 	 * WidgetName must name a component/widget variable of the owning Blueprint class (widgets need
 	 * bIsVariable=true and a compile before the variable exists). The delegate owner class (for example
 	 * UButton) is derived from that variable's object property.
-	 *
-	 * Returns the new node's object path, or empty (logged) on failure.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static FString AddComponentBoundEventNode(
+	static FEditorAutomationResult AddComponentBoundEventNode(
 		UEdGraph* Graph,
 		const FString& WidgetName,
-		const FString& DelegateName);
+		const FString& DelegateName,
+		FString& OutNodeObjectPath);
 
-	/**
-	 * Add a Branch (if/then/else) node to a graph.
-	 *
-	 * Pins: condition (bool input), execute (exec input), true / false (exec outputs).
-	 * Returns the new node's object path, or empty (logged) on failure.
-	 */
+	/** Add a Branch (if/then/else) node; pins: condition, execute, true, false. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static FString AddBranchNode(
+	static FEditorAutomationResult AddBranchNode(
 		UEdGraph* Graph,
 		int32 NodePosX,
-		int32 NodePosY);
+		int32 NodePosY,
+		FString& OutNodeObjectPath);
 
-	/** Add a variable-get node; returns the new node's object path, or empty (logged) on failure. */
+	/** Add a variable-get node for one Blueprint member. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static FString AddVariableGetNode(
+	static FEditorAutomationResult AddVariableGetNode(
 		UEdGraph* Graph,
-		const FString& VariableName);
+		const FString& VariableName,
+		FString& OutNodeObjectPath);
 
-	/** Add a variable-set node; returns the new node's object path, or empty (logged) on failure. */
+	/** Add a variable-set node for one Blueprint member. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static FString AddVariableSetNode(
+	static FEditorAutomationResult AddVariableSetNode(
 		UEdGraph* Graph,
-		const FString& VariableName);
+		const FString& VariableName,
+		FString& OutNodeObjectPath);
 
 	/**
 	 * Add one Blueprint member variable.
@@ -145,37 +157,42 @@ public:
 	 * "string", "name", "byte"). Call this before adding variable get/set nodes, then compile the Blueprint.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static bool AddBlueprintVariable(
+	static FEditorAutomationResult AddBlueprintVariable(
 		const TSoftObjectPtr<UBlueprint>& Blueprint,
 		const FString& VariableName,
 		const FString& TypeString);
 
-	/** Connect two pins; returns false (logged) when a pin is missing or the schema rejects the connection. */
+	/** Connect two pins. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static bool ConnectPins(
+	static FEditorAutomationResult ConnectPins(
 		UEdGraphNode* FromNode,
 		const FString& FromPinName,
 		UEdGraphNode* ToNode,
 		const FString& ToPinName);
 
+	/** Set one pin's default value text. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static bool SetPinDefaultValue(
+	static FEditorAutomationResult SetPinDefaultValue(
 		UEdGraphNode* Node,
 		const FString& PinName,
 		const FString& DefaultValue);
 
+	/** Move one node. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static bool SetNodePosition(UEdGraphNode* Node, int32 NodePosX, int32 NodePosY);
+	static FEditorAutomationResult SetNodePosition(UEdGraphNode* Node, int32 NodePosX, int32 NodePosY);
 
+	/** Set one pin's default object reference. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static bool SetPinDefaultObject(UEdGraphNode* Node, const FString& PinName, const FString& ObjectPath);
+	static FEditorAutomationResult SetPinDefaultObject(UEdGraphNode* Node, const FString& PinName, const FString& ObjectPath);
 
+	/** Remove one graph node. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static bool RemoveGraphNode(UEdGraphNode* Node);
+	static FEditorAutomationResult RemoveGraphNode(UEdGraphNode* Node);
 
-	/** Remove every node of one class from a graph; returns the number of removed nodes (logged on failure). */
+	/** Remove every node of one class from a graph; returns the count through OutRemovedCount. */
 	UFUNCTION(BlueprintCallable, Category = "EditorAutomationBlueprintGraph")
-	static int32 RemoveGraphNodesByClass(UEdGraph* Graph, const FString& NodeClassPath);
-
-
+	static FEditorAutomationResult RemoveGraphNodesByClass(
+		UEdGraph* Graph,
+		const FString& NodeClassPath,
+		int32& OutRemovedCount);
 };
